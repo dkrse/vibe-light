@@ -209,6 +209,8 @@ typedef struct {
     VibeWindow *win;
     GtkWindow *dialog;
     GPtrArray *allocs;
+    GtkWidget *theme_dd;
+    gulong     theme_handler;
 } SettingsCtx;
 
 static void on_settings_destroy(GtkWidget *widget, gpointer data) {
@@ -223,12 +225,14 @@ static void on_settings_apply(GtkButton *btn, gpointer data) {
     SettingsCtx *ctx = data;
     settings_save(&ctx->win->settings);
     vibe_window_apply_settings(ctx->win);
+    g_signal_handler_disconnect(ctx->theme_dd, ctx->theme_handler);
     gtk_window_close(ctx->dialog);
 }
 
 static void on_settings_cancel(GtkButton *btn, gpointer data) {
     (void)btn;
     SettingsCtx *ctx = data;
+    g_signal_handler_disconnect(ctx->theme_dd, ctx->theme_handler);
     settings_load(&ctx->win->settings);
     vibe_window_apply_settings(ctx->win);
     gtk_window_close(ctx->dialog);
@@ -262,6 +266,8 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
     gtk_box_append(GTK_BOX(vbox), nb);
 
     /* ── Tab: GUI ── */
+    GtkWidget *theme_dd = NULL;
+    gulong theme_handler = 0;
     {
         GtkWidget *grid = gtk_grid_new();
         gtk_grid_set_row_spacing(GTK_GRID(grid), 10);
@@ -274,7 +280,7 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
 
         /* Theme */
         gtk_grid_attach(GTK_GRID(grid), make_label("Theme:"), 0, row, 1, 1);
-        GtkWidget *theme_dd = gtk_drop_down_new_from_strings(theme_names);
+        theme_dd = gtk_drop_down_new_from_strings(theme_names);
         gtk_widget_set_hexpand(theme_dd, TRUE);
         for (int i = 0; theme_ids[i]; i++) {
             if (strcmp(win->settings.theme, theme_ids[i]) == 0) {
@@ -282,7 +288,7 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
                 break;
             }
         }
-        g_signal_connect(theme_dd, "notify::selected", G_CALLBACK(on_theme_changed), win);
+        theme_handler = g_signal_connect(theme_dd, "notify::selected", G_CALLBACK(on_theme_changed), win);
         gtk_grid_attach(GTK_GRID(grid), theme_dd, 1, row++, 1, 1);
 
         /* Font */
@@ -416,6 +422,8 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
     ctx->win = win;
     ctx->dialog = GTK_WINDOW(dialog);
     ctx->allocs = allocs;
+    ctx->theme_dd = theme_dd;
+    ctx->theme_handler = theme_handler;
 
     g_signal_connect(dialog, "destroy", G_CALLBACK(on_settings_destroy), ctx);
 
