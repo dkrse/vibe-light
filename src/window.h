@@ -35,6 +35,30 @@ typedef struct {
     char                  ssh_remote_path[1024]; /* remote root, e.g. /opt */
     char                  ssh_mount[2048];       /* local sshfs mount point */
 
+    /* Cancellable for all async operations — cancelled on destroy */
+    GCancellable         *cancellable;
+
+    /* File system watcher (local: inotify via GFileMonitor) */
+    GFileMonitor         *dir_monitor;
+    guint                 fs_refresh_id;        /* debounce timer */
+    GFileMonitor         *file_monitor;         /* watches open file */
+    guint                 file_reload_id;       /* debounce for file reload */
+    char                  current_file[4096];   /* path of file in editor */
+
+    /* SSH multiplexing (ControlMaster) */
+    char                  ssh_ctl_path[512];    /* control socket path */
+    char                  ssh_ctl_dir[256];     /* mkdtemp directory */
+
+    /* Remote watching */
+    GSubprocess          *inotify_proc;         /* ssh inotifywait -m */
+    GDataInputStream     *inotify_stream;       /* stdout of inotifywait */
+    guint                 remote_dir_poll_id;   /* fallback poll timer */
+    gboolean              dir_poll_in_flight;   /* guard: poll running */
+    guint                 remote_file_poll_id;  /* file poll timer */
+    gboolean              file_poll_in_flight;  /* guard: poll running */
+    guint32               remote_dir_hash;      /* hash of last ls output */
+    gint64                remote_file_mtime;    /* mtime of open file */
+
     /* Tab 3: Prompt */
     GtkTextView          *prompt_view;
     GtkTextBuffer        *prompt_buffer;

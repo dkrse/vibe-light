@@ -5,6 +5,7 @@ A lightweight file browser, terminal, and prompt application built with GTK4 and
 ## Features
 
 - **File Browser** -- Navigate directories, view files with line numbers and current line highlight
+- **Live File Watching** -- File browser and editor update automatically when files change on disk
 - **Terminal** -- Embedded VTE terminal, spawned in the opened directory
 - **Prompt** -- Send text commands to the terminal with configurable send key
 - **SFTP/SSH** -- Browse remote directories and view remote files via SSH (no sshfs required)
@@ -74,6 +75,8 @@ Connect to remote servers via Menu > SFTP/SSH:
 - Disconnect via status bar button
 
 No `sshfs` or FUSE required. Uses `ssh` commands directly (Midnight Commander-style).
+
+SSH connections use ControlMaster multiplexing for efficient reuse of a single TCP connection. Remote file watching uses `inotifywait` on the server when available (instant notifications), with automatic fallback to periodic polling.
 
 ## Settings Tabs
 

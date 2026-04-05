@@ -634,7 +634,8 @@ static const char *to_remote_path(VibeWindow *win, const char *local_path,
 }
 
 /* Build SSH base argv — caller must free with g_ptr_array_unref().
-   Does NOT add trailing NULL — caller adds command args + NULL. */
+   Does NOT add trailing NULL — caller adds command args + NULL.
+   Uses ControlMaster multiplexing when a control socket exists. */
 static GPtrArray *ssh_argv_new(VibeWindow *win) {
     GPtrArray *av = g_ptr_array_new_with_free_func(g_free);
     g_ptr_array_add(av, g_strdup("ssh"));
@@ -646,12 +647,110 @@ static GPtrArray *ssh_argv_new(VibeWindow *win) {
     g_ptr_array_add(av, g_strdup("BatchMode=yes"));
     g_ptr_array_add(av, g_strdup("-o"));
     g_ptr_array_add(av, g_strdup("ConnectTimeout=10"));
+    if (win->ssh_ctl_path[0]) {
+        g_ptr_array_add(av, g_strdup("-o"));
+        g_ptr_array_add(av, g_strdup_printf("ControlPath=%s", win->ssh_ctl_path));
+    }
     if (win->ssh_key[0]) {
         g_ptr_array_add(av, g_strdup("-i"));
         g_ptr_array_add(av, g_strdup(win->ssh_key));
     }
     g_ptr_array_add(av, g_strdup_printf("%s@%s", win->ssh_user, win->ssh_host));
     return av;
+}
+
+/* Also build argv from plain params (for use in background threads) */
+static GPtrArray *ssh_argv_from_params(const char *host, const char *user,
+                                        int port, const char *key,
+                                        const char *ctl_path) {
+    GPtrArray *av = g_ptr_array_new_with_free_func(g_free);
+    g_ptr_array_add(av, g_strdup("ssh"));
+    g_ptr_array_add(av, g_strdup("-p"));
+    g_ptr_array_add(av, g_strdup_printf("%d", port));
+    g_ptr_array_add(av, g_strdup("-o"));
+    g_ptr_array_add(av, g_strdup("StrictHostKeyChecking=accept-new"));
+    g_ptr_array_add(av, g_strdup("-o"));
+    g_ptr_array_add(av, g_strdup("BatchMode=yes"));
+    g_ptr_array_add(av, g_strdup("-o"));
+    g_ptr_array_add(av, g_strdup("ConnectTimeout=5"));
+    if (ctl_path[0]) {
+        g_ptr_array_add(av, g_strdup("-o"));
+        g_ptr_array_add(av, g_strdup_printf("ControlPath=%s", ctl_path));
+    }
+    if (key[0]) {
+        g_ptr_array_add(av, g_strdup("-i"));
+        g_ptr_array_add(av, g_strdup(key));
+    }
+    g_ptr_array_add(av, g_strdup_printf("%s@%s", user, host));
+    return av;
+}
+
+/* ── SSH ControlMaster lifecycle ── */
+
+static void ssh_ctl_start(VibeWindow *win) {
+    /* Use XDG_RUNTIME_DIR (user-private, tmpfs) or fall back to /tmp with mkdtemp */
+    const char *runtime = g_get_user_runtime_dir(); /* XDG_RUNTIME_DIR or fallback */
+    snprintf(win->ssh_ctl_dir, sizeof(win->ssh_ctl_dir),
+             "%s/vibe-ssh-XXXXXX", runtime);
+    if (!mkdtemp(win->ssh_ctl_dir)) {
+        win->ssh_ctl_dir[0] = '\0';
+        win->ssh_ctl_path[0] = '\0';
+        return;
+    }
+    snprintf(win->ssh_ctl_path, sizeof(win->ssh_ctl_path),
+             "%s/ctl", win->ssh_ctl_dir);
+
+    GPtrArray *av = g_ptr_array_new_with_free_func(g_free);
+    g_ptr_array_add(av, g_strdup("ssh"));
+    g_ptr_array_add(av, g_strdup("-p"));
+    g_ptr_array_add(av, g_strdup_printf("%d", win->ssh_port));
+    g_ptr_array_add(av, g_strdup("-o"));
+    g_ptr_array_add(av, g_strdup("StrictHostKeyChecking=accept-new"));
+    g_ptr_array_add(av, g_strdup("-o"));
+    g_ptr_array_add(av, g_strdup("BatchMode=yes"));
+    g_ptr_array_add(av, g_strdup("-o"));
+    g_ptr_array_add(av, g_strdup("ConnectTimeout=10"));
+    g_ptr_array_add(av, g_strdup("-o"));
+    g_ptr_array_add(av, g_strdup("ControlMaster=yes"));
+    g_ptr_array_add(av, g_strdup("-o"));
+    g_ptr_array_add(av, g_strdup_printf("ControlPath=%s", win->ssh_ctl_path));
+    g_ptr_array_add(av, g_strdup("-o"));
+    g_ptr_array_add(av, g_strdup("ControlPersist=60"));
+    if (win->ssh_key[0]) {
+        g_ptr_array_add(av, g_strdup("-i"));
+        g_ptr_array_add(av, g_strdup(win->ssh_key));
+    }
+    g_ptr_array_add(av, g_strdup_printf("%s@%s", win->ssh_user, win->ssh_host));
+    g_ptr_array_add(av, g_strdup("-fN")); /* fork to background, no command */
+    g_ptr_array_add(av, NULL);
+
+    g_spawn_sync(NULL, (char **)av->pdata, NULL,
+                 G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL, NULL);
+    g_ptr_array_unref(av);
+}
+
+static void ssh_ctl_stop(VibeWindow *win) {
+    if (!win->ssh_ctl_path[0]) return;
+
+    GPtrArray *av = g_ptr_array_new_with_free_func(g_free);
+    g_ptr_array_add(av, g_strdup("ssh"));
+    g_ptr_array_add(av, g_strdup("-o"));
+    g_ptr_array_add(av, g_strdup_printf("ControlPath=%s", win->ssh_ctl_path));
+    g_ptr_array_add(av, g_strdup("-O"));
+    g_ptr_array_add(av, g_strdup("exit"));
+    g_ptr_array_add(av, g_strdup_printf("%s@%s", win->ssh_user, win->ssh_host));
+    g_ptr_array_add(av, NULL);
+
+    g_spawn_sync(NULL, (char **)av->pdata, NULL,
+                 G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL, NULL);
+    g_ptr_array_unref(av);
+
+    unlink(win->ssh_ctl_path);
+    win->ssh_ctl_path[0] = '\0';
+    if (win->ssh_ctl_dir[0]) {
+        rmdir(win->ssh_ctl_dir);
+        win->ssh_ctl_dir[0] = '\0';
+    }
 }
 
 /* Run SSH command synchronously with argv (no shell — immune to injection).
@@ -681,13 +780,13 @@ static gboolean ssh_spawn_sync(GPtrArray *argv, char **out_stdout,
         return FALSE;
     }
 
+    if (out_len)
+        *out_len = stdout_buf ? strlen(stdout_buf) : 0;
+
     if (out_stdout)
         *out_stdout = stdout_buf;
     else
         g_free(stdout_buf);
-
-    if (out_len)
-        *out_len = stdout_buf ? strlen(stdout_buf) : 0;
 
     return TRUE;
 }
@@ -743,6 +842,714 @@ static void ssh_ls_populate(VibeWindow *win, const char *local_dir_path,
     g_strfreev(lines);
 }
 
+static void count_entries(const char *path, int *files, int *dirs);
+static void load_file_content(VibeWindow *win, const char *filepath);
+
+/* ── File system monitoring ── */
+
+static void stop_inotify_proc(VibeWindow *win) {
+    if (win->inotify_stream) {
+        g_input_stream_close(G_INPUT_STREAM(win->inotify_stream), NULL, NULL);
+        g_object_unref(win->inotify_stream);
+        win->inotify_stream = NULL;
+    }
+    if (win->inotify_proc) {
+        g_subprocess_force_exit(win->inotify_proc);
+        g_object_unref(win->inotify_proc);
+        win->inotify_proc = NULL;
+    }
+}
+
+static void stop_file_monitor(VibeWindow *win) {
+    if (win->file_monitor) {
+        g_file_monitor_cancel(win->file_monitor);
+        g_object_unref(win->file_monitor);
+        win->file_monitor = NULL;
+    }
+    if (win->file_reload_id) {
+        g_source_remove(win->file_reload_id);
+        win->file_reload_id = 0;
+    }
+    if (win->remote_file_poll_id) {
+        g_source_remove(win->remote_file_poll_id);
+        win->remote_file_poll_id = 0;
+    }
+    win->remote_file_mtime = 0;
+    win->file_poll_in_flight = FALSE;
+}
+
+static void stop_dir_monitor(VibeWindow *win) {
+    if (win->fs_refresh_id) {
+        g_source_remove(win->fs_refresh_id);
+        win->fs_refresh_id = 0;
+    }
+    if (win->dir_monitor) {
+        g_file_monitor_cancel(win->dir_monitor);
+        g_object_unref(win->dir_monitor);
+        win->dir_monitor = NULL;
+    }
+    if (win->remote_dir_poll_id) {
+        g_source_remove(win->remote_dir_poll_id);
+        win->remote_dir_poll_id = 0;
+    }
+    stop_inotify_proc(win);
+    win->remote_dir_hash = 0;
+    win->dir_poll_in_flight = FALSE;
+}
+
+/* --- Async file/dir count (runs in thread, updates label on main thread) --- */
+
+typedef struct {
+    VibeWindow *win;
+    char        path[4096];
+} CountCtx;
+
+static void count_thread_func(GTask *task, gpointer src, gpointer data,
+                               GCancellable *cancel) {
+    (void)src; (void)cancel;
+    CountCtx *ctx = data;
+    int files = 0, dirs = 0;
+    count_entries(ctx->path, &files, &dirs);
+    gint64 result = ((gint64)files << 32) | (guint32)dirs;
+    g_task_return_int(task, result);
+}
+
+static void count_finished_cb(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    CountCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+    GError *err = NULL;
+    gint64 result = g_task_propagate_int(G_TASK(res), &err);
+    if (err) {
+        g_error_free(err);
+        g_free(ctx);
+        return;
+    }
+    if (g_cancellable_is_cancelled(win->cancellable)) {
+        g_free(ctx);
+        return;
+    }
+    int files = (int)(result >> 32);
+    int dirs  = (int)(result & 0xFFFFFFFF);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%d files, %d dirs", files, dirs);
+    gtk_label_set_text(win->status_label, buf);
+    g_free(ctx);
+}
+
+/* Collect paths of expanded directories so we can restore state after refresh */
+static GPtrArray *collect_expanded_paths(VibeWindow *win) {
+    GPtrArray *paths = g_ptr_array_new_with_free_func(g_free);
+    for (int i = 0; ; i++) {
+        GtkListBoxRow *row = gtk_list_box_get_row_at_index(win->file_list, i);
+        if (!row) break;
+        GtkWidget *lbl = gtk_widget_get_first_child(GTK_WIDGET(row));
+        gboolean is_dir = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(lbl), "is-dir"));
+        gboolean expanded = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(lbl), "expanded"));
+        if (is_dir && expanded) {
+            const char *fp = g_object_get_data(G_OBJECT(lbl), "full-path");
+            if (fp) g_ptr_array_add(paths, g_strdup(fp));
+        }
+    }
+    return paths;
+}
+
+/* Re-expand previously expanded directories after a refresh */
+static void restore_expanded(VibeWindow *win, GPtrArray *paths) {
+    for (guint p = 0; p < paths->len; p++) {
+        const char *want = g_ptr_array_index(paths, p);
+        /* Find row with this path */
+        for (int i = 0; ; i++) {
+            GtkListBoxRow *row = gtk_list_box_get_row_at_index(win->file_list, i);
+            if (!row) break;
+            GtkWidget *lbl = gtk_widget_get_first_child(GTK_WIDGET(row));
+            const char *fp = g_object_get_data(G_OBJECT(lbl), "full-path");
+            gboolean is_dir = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(lbl), "is-dir"));
+            if (!is_dir || !fp || strcmp(fp, want) != 0) continue;
+
+            /* Expand it */
+            int depth = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(lbl), "depth"));
+            if (path_is_remote(fp) && win->ssh_host[0])
+                ssh_ls_populate(win, fp, depth + 1, i + 1);
+            else
+                insert_children(win, fp, depth + 1, i + 1);
+            g_object_set_data(G_OBJECT(lbl), "expanded", GINT_TO_POINTER(TRUE));
+
+            const char *name = strrchr(fp, '/');
+            name = name ? name + 1 : fp;
+            char indent[128] = "";
+            for (int d = 0; d < depth; d++) strcat(indent, "  ");
+            char buf[512];
+            snprintf(buf, sizeof(buf), "%s▼ %s", indent, name);
+            gtk_label_set_text(GTK_LABEL(lbl), buf);
+            break;
+        }
+    }
+}
+
+/* Repopulate the file list, preserving expanded dirs (local — runs on main thread) */
+static void refresh_file_list_local(VibeWindow *win) {
+    GPtrArray *expanded = collect_expanded_paths(win);
+
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(win->file_list))))
+        gtk_list_box_remove(win->file_list, child);
+
+    insert_children(win, win->current_dir, 0, -1);
+    restore_expanded(win, expanded);
+    g_ptr_array_unref(expanded);
+    update_file_status(win);
+}
+
+/* Remote refresh via GTask — ssh_ls_populate runs in callback on main thread
+   after the async "which" pattern. But ssh_ls_populate is sync SSH...
+   To avoid blocking, we fetch ls output in a thread and apply it on main. */
+
+typedef struct {
+    VibeWindow *win;
+    char       *ls_output;   /* owned */
+    char        local_dir[4096];
+    char        current_dir_snapshot[2048]; /* to verify dir didn't change */
+    GPtrArray  *expanded;    /* paths to re-expand, owned */
+} RemoteRefreshCtx;
+
+static void remote_refresh_thread(GTask *task, gpointer src, gpointer data,
+                                   GCancellable *cancel) {
+    (void)src; (void)cancel;
+    RemoteRefreshCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+
+    /* Build SSH argv from win — safe because we only read immutable-during-connection fields
+       (ssh_host/user/port/key/ctl_path don't change while connected) */
+    GPtrArray *av = ssh_argv_from_params(win->ssh_host, win->ssh_user,
+                                          win->ssh_port, win->ssh_key,
+                                          win->ssh_ctl_path);
+    char remote[4096];
+    to_remote_path(win, ctx->local_dir, remote, sizeof(remote));
+
+    g_ptr_array_add(av, g_strdup("--"));
+    g_ptr_array_add(av, g_strdup("ls"));
+    g_ptr_array_add(av, g_strdup("-1pA"));
+    g_ptr_array_add(av, g_strdup(remote));
+
+    char *stdout_buf = NULL;
+    ssh_spawn_sync(av, &stdout_buf, NULL);
+    g_ptr_array_unref(av);
+
+    ctx->ls_output = stdout_buf; /* may be NULL on failure */
+    g_task_return_boolean(task, stdout_buf != NULL);
+}
+
+static void remote_refresh_done(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    RemoteRefreshCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+
+    GError *err = NULL;
+    g_task_propagate_boolean(G_TASK(res), &err);
+    if (err) g_error_free(err);
+
+    if (g_cancellable_is_cancelled(win->cancellable) ||
+        strcmp(win->current_dir, ctx->current_dir_snapshot) != 0) {
+        /* Window destroyed or dir changed — discard */
+        g_free(ctx->ls_output);
+        g_ptr_array_unref(ctx->expanded);
+        g_free(ctx);
+        return;
+    }
+
+    /* Clear and repopulate from ls output */
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(win->file_list))))
+        gtk_list_box_remove(win->file_list, child);
+
+    if (ctx->ls_output) {
+        char **lines = g_strsplit(ctx->ls_output, "\n", -1);
+        int nlines = 0;
+        for (char **p = lines; *p && **p; p++) nlines++;
+
+        int inserted = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            for (int i = 0; i < nlines; i++) {
+                char *name = lines[i];
+                int len = (int)strlen(name);
+                if (!len) continue;
+                gboolean is_dir = (name[len - 1] == '/');
+                if ((pass == 0 && !is_dir) || (pass == 1 && is_dir)) continue;
+
+                char clean_name[512];
+                g_strlcpy(clean_name, name, sizeof(clean_name));
+                if (is_dir && clean_name[0])
+                    clean_name[strlen(clean_name) - 1] = '\0';
+
+                char full[4096];
+                snprintf(full, sizeof(full), "%s/%s", ctx->local_dir, clean_name);
+                GtkWidget *lbl = create_tree_row(full, clean_name, is_dir, 0);
+                gtk_list_box_insert(win->file_list, lbl, -1);
+                inserted++;
+            }
+        }
+        g_strfreev(lines);
+        g_free(ctx->ls_output);
+    }
+
+    restore_expanded(win, ctx->expanded);
+    g_ptr_array_unref(ctx->expanded);
+    update_file_status(win);
+    g_free(ctx);
+}
+
+/* Debounced refresh callback */
+static gboolean fs_refresh_cb(gpointer data) {
+    VibeWindow *win = data;
+    win->fs_refresh_id = 0;
+
+    const char *path = win->current_dir;
+    if (!path[0]) return G_SOURCE_REMOVE;
+
+    if (path_is_remote(path) && win->ssh_host[0]) {
+        /* Async remote refresh — don't block UI */
+        RemoteRefreshCtx *ctx = g_new0(RemoteRefreshCtx, 1);
+        ctx->win = win;
+        g_strlcpy(ctx->local_dir, path, sizeof(ctx->local_dir));
+        g_strlcpy(ctx->current_dir_snapshot, path, sizeof(ctx->current_dir_snapshot));
+        ctx->expanded = collect_expanded_paths(win);
+
+        GTask *task = g_task_new(NULL, NULL, remote_refresh_done, ctx);
+        g_task_set_task_data(task, ctx, NULL);
+        g_task_run_in_thread(task, remote_refresh_thread);
+        g_object_unref(task);
+    } else {
+        refresh_file_list_local(win);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void on_dir_changed(GFileMonitor *mon, GFile *file, GFile *other,
+                            GFileMonitorEvent event, gpointer data) {
+    (void)mon; (void)file; (void)other;
+    VibeWindow *win = data;
+
+    switch (event) {
+        case G_FILE_MONITOR_EVENT_CREATED:
+        case G_FILE_MONITOR_EVENT_DELETED:
+        case G_FILE_MONITOR_EVENT_RENAMED:
+        case G_FILE_MONITOR_EVENT_MOVED_IN:
+        case G_FILE_MONITOR_EVENT_MOVED_OUT:
+            break;
+        default:
+            return;
+    }
+
+    if (win->fs_refresh_id)
+        g_source_remove(win->fs_refresh_id);
+    win->fs_refresh_id = g_timeout_add(200, fs_refresh_cb, win);
+}
+
+/* Simple djb2 hash for comparing ls output */
+static guint32 djb2_hash(const char *str) {
+    guint32 h = 5381;
+    for (; *str; str++)
+        h = ((h << 5) + h) + (unsigned char)*str;
+    return h;
+}
+
+/* ── Remote inotifywait-based directory watching ──
+   Spawns: ssh ... inotifywait -m -e create,delete,move,modify --format '%e' <dir>
+   Reads stdout line-by-line asynchronously. Falls back to polling if
+   inotifywait is not available on the server. */
+
+static void inotifywait_read_line_cb(GObject *src, GAsyncResult *res, gpointer data);
+
+static void schedule_inotifywait_read(VibeWindow *win) {
+    if (!win->inotify_stream) return;
+    g_data_input_stream_read_line_async(win->inotify_stream,
+                                         G_PRIORITY_DEFAULT, NULL,
+                                         inotifywait_read_line_cb, win);
+}
+
+static gboolean debounced_file_reload_cb(gpointer data) {
+    VibeWindow *win = data;
+    win->file_reload_id = 0;
+    if (win->current_file[0] && !g_cancellable_is_cancelled(win->cancellable))
+        load_file_content(win, win->current_file);
+    return G_SOURCE_REMOVE;
+}
+
+static void inotifywait_read_line_cb(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    VibeWindow *win = data;
+
+    if (g_cancellable_is_cancelled(win->cancellable)) return;
+    if (!win->inotify_stream) return;
+
+    gsize len = 0;
+    GError *err = NULL;
+    char *line = g_data_input_stream_read_line_finish(
+                     win->inotify_stream, res, &len, &err);
+
+    if (!line) {
+        if (err) g_error_free(err);
+        return;
+    }
+
+    /* Debounce directory refresh */
+    if (win->fs_refresh_id)
+        g_source_remove(win->fs_refresh_id);
+    win->fs_refresh_id = g_timeout_add(200, fs_refresh_cb, win);
+
+    /* Debounce file reload on MODIFY */
+    if (win->current_file[0] && strstr(line, "MODIFY")) {
+        if (win->file_reload_id)
+            g_source_remove(win->file_reload_id);
+        win->file_reload_id = g_timeout_add(200, debounced_file_reload_cb, win);
+    }
+
+    g_free(line);
+    schedule_inotifywait_read(win);
+}
+
+static void start_remote_inotifywait(VibeWindow *win, const char *remote_dir);
+
+/* Fallback polling — used when inotifywait is not available */
+
+typedef struct {
+    VibeWindow *win;
+    char        remote_path[4096];
+    char        local_dir[4096];
+    char        ssh_host[256];
+    char        ssh_user[128];
+    int         ssh_port;
+    char        ssh_key[1024];
+    char        ssh_ctl_path[256];
+} RemoteDirPollCtx;
+
+static void remote_dir_poll_thread(GTask *task, gpointer src, gpointer data,
+                                    GCancellable *cancel) {
+    (void)src; (void)cancel;
+    RemoteDirPollCtx *ctx = data;
+
+    GPtrArray *av = ssh_argv_from_params(ctx->ssh_host, ctx->ssh_user,
+                                          ctx->ssh_port, ctx->ssh_key,
+                                          ctx->ssh_ctl_path);
+    g_ptr_array_add(av, g_strdup("--"));
+    g_ptr_array_add(av, g_strdup("ls"));
+    g_ptr_array_add(av, g_strdup("-1pA"));
+    g_ptr_array_add(av, g_strdup(ctx->remote_path));
+
+    char *stdout_buf = NULL;
+    if (ssh_spawn_sync(av, &stdout_buf, NULL) && stdout_buf) {
+        guint32 h = djb2_hash(stdout_buf);
+        g_task_return_int(task, (gint64)h);
+        g_free(stdout_buf);
+    } else {
+        g_task_return_int(task, 0);
+    }
+    g_ptr_array_unref(av);
+}
+
+static void remote_dir_poll_done(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    RemoteDirPollCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+    win->dir_poll_in_flight = FALSE;
+
+    GError *err = NULL;
+    gint64 h = g_task_propagate_int(G_TASK(res), &err);
+    if (err) { g_error_free(err); g_free(ctx); return; }
+    if (g_cancellable_is_cancelled(win->cancellable)) { g_free(ctx); return; }
+
+    if (h != 0 && (guint32)h != win->remote_dir_hash &&
+        g_strcmp0(win->current_dir, ctx->local_dir) == 0) {
+        win->remote_dir_hash = (guint32)h;
+        if (!win->fs_refresh_id)
+            win->fs_refresh_id = g_timeout_add(50, fs_refresh_cb, win);
+    }
+    g_free(ctx);
+}
+
+static gboolean remote_dir_poll_tick(gpointer data) {
+    VibeWindow *win = data;
+    if (!win->ssh_host[0] || !win->current_dir[0]) return G_SOURCE_REMOVE;
+    if (win->dir_poll_in_flight) return G_SOURCE_CONTINUE; /* skip if previous still running */
+
+    RemoteDirPollCtx *ctx = g_new0(RemoteDirPollCtx, 1);
+    ctx->win = win;
+    g_strlcpy(ctx->local_dir, win->current_dir, sizeof(ctx->local_dir));
+    g_strlcpy(ctx->ssh_host, win->ssh_host, sizeof(ctx->ssh_host));
+    g_strlcpy(ctx->ssh_user, win->ssh_user, sizeof(ctx->ssh_user));
+    ctx->ssh_port = win->ssh_port;
+    g_strlcpy(ctx->ssh_key, win->ssh_key, sizeof(ctx->ssh_key));
+    g_strlcpy(ctx->ssh_ctl_path, win->ssh_ctl_path, sizeof(ctx->ssh_ctl_path));
+
+    char remote[4096];
+    to_remote_path(win, win->current_dir, remote, sizeof(remote));
+    g_strlcpy(ctx->remote_path, remote, sizeof(ctx->remote_path));
+
+    win->dir_poll_in_flight = TRUE;
+    GTask *task = g_task_new(NULL, NULL, remote_dir_poll_done, ctx);
+    g_task_set_task_data(task, ctx, NULL);
+    g_task_run_in_thread(task, remote_dir_poll_thread);
+    g_object_unref(task);
+
+    return G_SOURCE_CONTINUE;
+}
+
+static void start_remote_fallback_poll(VibeWindow *win) {
+    win->remote_dir_hash = 0;
+    remote_dir_poll_tick(win);
+    win->remote_dir_poll_id = g_timeout_add_seconds(2, remote_dir_poll_tick, win);
+}
+
+/* Try to spawn inotifywait; if it fails (exit code != 0 quickly), fall back to polling */
+
+typedef struct {
+    VibeWindow *win;
+    char        remote_dir[4096];
+    char        ssh_host[256];
+    char        ssh_user[128];
+    int         ssh_port;
+    char        ssh_key[1024];
+    char        ssh_ctl_path[512];
+} InotifyCheckCtx;
+
+static void inotifywait_check_thread(GTask *task, gpointer src, gpointer data,
+                                      GCancellable *cancel) {
+    (void)src; (void)cancel;
+    InotifyCheckCtx *ctx = data;
+
+    GPtrArray *av = ssh_argv_from_params(ctx->ssh_host, ctx->ssh_user,
+                                          ctx->ssh_port, ctx->ssh_key,
+                                          ctx->ssh_ctl_path);
+    g_ptr_array_add(av, g_strdup("--"));
+    g_ptr_array_add(av, g_strdup("which"));
+    g_ptr_array_add(av, g_strdup("inotifywait"));
+
+    gboolean has_it = ssh_spawn_sync(av, NULL, NULL);
+    g_ptr_array_unref(av);
+
+    g_task_return_boolean(task, has_it);
+}
+
+static void inotifywait_check_done(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    InotifyCheckCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+    GError *err = NULL;
+    gboolean has_it = g_task_propagate_boolean(G_TASK(res), &err);
+    if (err) g_error_free(err);
+    if (g_cancellable_is_cancelled(win->cancellable)) { g_free(ctx); return; }
+
+    if (has_it) {
+        fprintf(stderr, "WATCH: using inotifywait for %s\n", ctx->remote_dir);
+        start_remote_inotifywait(win, ctx->remote_dir);
+    } else {
+        fprintf(stderr, "WATCH: inotifywait not found, falling back to polling\n");
+        start_remote_fallback_poll(win);
+    }
+    g_free(ctx);
+}
+
+static void start_remote_inotifywait(VibeWindow *win, const char *remote_dir) {
+    GPtrArray *av = ssh_argv_new(win);
+    g_ptr_array_add(av, g_strdup("--"));
+    g_ptr_array_add(av, g_strdup("inotifywait"));
+    g_ptr_array_add(av, g_strdup("-m"));
+    g_ptr_array_add(av, g_strdup("-q"));
+    g_ptr_array_add(av, g_strdup("-e"));
+    g_ptr_array_add(av, g_strdup("create,delete,move,modify,attrib"));
+    g_ptr_array_add(av, g_strdup("--format"));
+    g_ptr_array_add(av, g_strdup("%e %f"));
+    g_ptr_array_add(av, g_strdup(remote_dir));
+    g_ptr_array_add(av, NULL);
+
+    GError *err = NULL;
+    GSubprocessLauncher *launcher = g_subprocess_launcher_new(
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
+
+    win->inotify_proc = g_subprocess_launcher_spawnv(launcher,
+        (const char * const *)av->pdata, &err);
+    g_object_unref(launcher);
+    g_ptr_array_unref(av);
+
+    if (!win->inotify_proc) {
+        if (err) g_error_free(err);
+        start_remote_fallback_poll(win);
+        return;
+    }
+
+    GInputStream *stdout_stream = g_subprocess_get_stdout_pipe(win->inotify_proc);
+    win->inotify_stream = g_data_input_stream_new(stdout_stream);
+    schedule_inotifywait_read(win);
+}
+
+/* --- Remote file mtime polling (for open file in editor) --- */
+
+typedef struct {
+    VibeWindow *win;
+    char        remote_path[4096];
+    char        local_path[4096];
+    char        ssh_host[256];
+    char        ssh_user[128];
+    int         ssh_port;
+    char        ssh_key[1024];
+    char        ssh_ctl_path[256];
+} RemoteFilePollCtx;
+
+static void remote_file_poll_thread(GTask *task, gpointer src, gpointer data,
+                                     GCancellable *cancel) {
+    (void)src; (void)cancel;
+    RemoteFilePollCtx *ctx = data;
+
+    GPtrArray *av = ssh_argv_from_params(ctx->ssh_host, ctx->ssh_user,
+                                          ctx->ssh_port, ctx->ssh_key,
+                                          ctx->ssh_ctl_path);
+    g_ptr_array_add(av, g_strdup("--"));
+    g_ptr_array_add(av, g_strdup("stat"));
+    g_ptr_array_add(av, g_strdup("-c"));
+    g_ptr_array_add(av, g_strdup("%Y"));
+    g_ptr_array_add(av, g_strdup(ctx->remote_path));
+
+    char *stdout_buf = NULL;
+    if (ssh_spawn_sync(av, &stdout_buf, NULL) && stdout_buf) {
+        gint64 mtime = g_ascii_strtoll(stdout_buf, NULL, 10);
+        g_task_return_int(task, mtime);
+        g_free(stdout_buf);
+    } else {
+        g_task_return_int(task, 0);
+    }
+    g_ptr_array_unref(av);
+}
+
+static void remote_file_poll_done(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    RemoteFilePollCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+    win->file_poll_in_flight = FALSE;
+
+    GError *err = NULL;
+    gint64 mtime = g_task_propagate_int(G_TASK(res), &err);
+    if (err) { g_error_free(err); g_free(ctx); return; }
+    if (g_cancellable_is_cancelled(win->cancellable)) { g_free(ctx); return; }
+
+    if (mtime > 0 && mtime != win->remote_file_mtime &&
+        g_strcmp0(win->current_file, ctx->local_path) == 0) {
+        win->remote_file_mtime = mtime;
+        load_file_content(win, win->current_file);
+    }
+    g_free(ctx);
+}
+
+static gboolean remote_file_poll_tick(gpointer data) {
+    VibeWindow *win = data;
+    if (!win->ssh_host[0] || !win->current_file[0]) return G_SOURCE_REMOVE;
+    if (win->file_poll_in_flight) return G_SOURCE_CONTINUE;
+
+    RemoteFilePollCtx *ctx = g_new0(RemoteFilePollCtx, 1);
+    ctx->win = win;
+    g_strlcpy(ctx->local_path, win->current_file, sizeof(ctx->local_path));
+    g_strlcpy(ctx->ssh_host, win->ssh_host, sizeof(ctx->ssh_host));
+    g_strlcpy(ctx->ssh_user, win->ssh_user, sizeof(ctx->ssh_user));
+    ctx->ssh_port = win->ssh_port;
+    g_strlcpy(ctx->ssh_key, win->ssh_key, sizeof(ctx->ssh_key));
+    g_strlcpy(ctx->ssh_ctl_path, win->ssh_ctl_path, sizeof(ctx->ssh_ctl_path));
+
+    char remote[4096];
+    to_remote_path(win, win->current_file, remote, sizeof(remote));
+    g_strlcpy(ctx->remote_path, remote, sizeof(ctx->remote_path));
+
+    win->file_poll_in_flight = TRUE;
+    GTask *task = g_task_new(NULL, NULL, remote_file_poll_done, ctx);
+    g_task_set_task_data(task, ctx, NULL);
+    g_task_run_in_thread(task, remote_file_poll_thread);
+    g_object_unref(task);
+
+    return G_SOURCE_CONTINUE;
+}
+
+/* --- Start/stop monitors (local inotify OR remote inotifywait/polling) --- */
+
+static void start_dir_monitor(VibeWindow *win, const char *path) {
+    stop_dir_monitor(win);
+
+    if (path_is_remote(path) && win->ssh_host[0]) {
+        /* Remote: try inotifywait first, fall back to polling */
+        char remote[4096];
+        to_remote_path(win, path, remote, sizeof(remote));
+
+        InotifyCheckCtx *ctx = g_new0(InotifyCheckCtx, 1);
+        ctx->win = win;
+        g_strlcpy(ctx->remote_dir, remote, sizeof(ctx->remote_dir));
+        g_strlcpy(ctx->ssh_host, win->ssh_host, sizeof(ctx->ssh_host));
+        g_strlcpy(ctx->ssh_user, win->ssh_user, sizeof(ctx->ssh_user));
+        ctx->ssh_port = win->ssh_port;
+        g_strlcpy(ctx->ssh_key, win->ssh_key, sizeof(ctx->ssh_key));
+        g_strlcpy(ctx->ssh_ctl_path, win->ssh_ctl_path, sizeof(ctx->ssh_ctl_path));
+
+        GTask *task = g_task_new(NULL, NULL, inotifywait_check_done, ctx);
+        g_task_set_task_data(task, ctx, NULL);
+        g_task_run_in_thread(task, inotifywait_check_thread);
+        g_object_unref(task);
+        return;
+    }
+
+    GFile *dir = g_file_new_for_path(path);
+    GError *err = NULL;
+    win->dir_monitor = g_file_monitor_directory(dir, G_FILE_MONITOR_WATCH_MOVES,
+                                                 NULL, &err);
+    g_object_unref(dir);
+
+    if (win->dir_monitor) {
+        g_signal_connect(win->dir_monitor, "changed",
+                         G_CALLBACK(on_dir_changed), win);
+    } else {
+        if (err) g_error_free(err);
+    }
+}
+
+/* --- File content monitor (reload editor when external change) --- */
+
+static void on_file_changed(GFileMonitor *mon, GFile *file, GFile *other,
+                             GFileMonitorEvent event, gpointer data) {
+    (void)mon; (void)file; (void)other;
+    VibeWindow *win = data;
+
+    /* Only react to final write (avoids double reload from CHANGED+DONE pair) */
+    if (event != G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT)
+        return;
+
+    if (!win->current_file[0]) return;
+    /* Debounce: some editors do multiple write cycles */
+    if (win->file_reload_id)
+        g_source_remove(win->file_reload_id);
+    win->file_reload_id = g_timeout_add(150, debounced_file_reload_cb, win);
+}
+
+static void start_file_monitor(VibeWindow *win, const char *filepath) {
+    stop_file_monitor(win);
+    g_strlcpy(win->current_file, filepath, sizeof(win->current_file));
+
+    if (path_is_remote(filepath) && win->ssh_host[0]) {
+        /* Remote: poll mtime every 1s (uses ControlMaster — near zero overhead) */
+        win->remote_file_mtime = 0;
+        remote_file_poll_tick(win);
+        win->remote_file_poll_id = g_timeout_add_seconds(1, remote_file_poll_tick, win);
+        return;
+    }
+
+    GFile *f = g_file_new_for_path(filepath);
+    GError *err = NULL;
+    win->file_monitor = g_file_monitor_file(f, G_FILE_MONITOR_NONE, NULL, &err);
+    g_object_unref(f);
+
+    if (win->file_monitor) {
+        g_signal_connect(win->file_monitor, "changed",
+                         G_CALLBACK(on_file_changed), win);
+    } else {
+        if (err) g_error_free(err);
+    }
+}
+
 void vibe_window_open_directory(VibeWindow *win, const char *path) {
     g_strlcpy(win->current_dir, path, sizeof(win->current_dir));
     g_strlcpy(win->settings.last_directory, path, sizeof(win->settings.last_directory));
@@ -777,6 +1584,7 @@ void vibe_window_open_directory(VibeWindow *win, const char *path) {
     }
     fprintf(stderr, "OPENDIR: done\n");
     update_file_status(win);
+    start_dir_monitor(win, path);
 
     gtk_notebook_set_current_page(win->notebook, 0);
 }
@@ -786,6 +1594,8 @@ void vibe_window_set_root_directory(VibeWindow *win, const char *path) {
 
     fprintf(stderr, "SETROOT: remote=%d host=%s\n", path_is_remote(path), win->ssh_host);
     if (path_is_remote(path) && win->ssh_host[0]) {
+        /* Start SSH ControlMaster for multiplexed connections */
+        ssh_ctl_start(win);
         /* spawn ssh session in terminal */
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%d", win->ssh_port);
@@ -925,6 +1735,12 @@ static void load_file_content(VibeWindow *win, const char *filepath) {
     apply_font_intensity(win);
 }
 
+/* Wrapper that also starts file monitor — called from row activation */
+static void open_and_watch_file(VibeWindow *win, const char *filepath) {
+    load_file_content(win, filepath);
+    start_file_monitor(win, filepath);
+}
+
 static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data) {
     (void)box;
     VibeWindow *win = data;
@@ -981,7 +1797,7 @@ static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer 
         }
         update_file_status(win);
     } else {
-        load_file_content(win, full_path);
+        open_and_watch_file(win, full_path);
         gtk_widget_grab_focus(GTK_WIDGET(win->file_view));
     }
 }
@@ -1072,19 +1888,37 @@ static void on_tab_switched(GtkNotebook *nb, GtkWidget *page, guint page_num, gp
 
 /* ── Status bar update ── */
 
-/* Count immediate (non-hidden) children — no recursion to avoid blocking */
-static void count_entries(const char *path, int *files, int *dirs) {
+/* Recursively count all non-hidden files and directories.
+   Uses lstat to avoid following symlinks (prevents infinite loops).
+   Depth-limited to 64 levels. */
+#define COUNT_MAX_DEPTH 64
+static void count_entries_r(const char *path, int *files, int *dirs, int depth) {
+    if (depth > COUNT_MAX_DEPTH) return;
     DIR *d = opendir(path);
     if (!d) return;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.') continue;
-        if (ent->d_type == DT_DIR)
+
+        char full[4096];
+        snprintf(full, sizeof(full), "%s/%s", path, ent->d_name);
+
+        /* Use lstat — don't follow symlinks to avoid cycles */
+        struct stat st;
+        if (lstat(full, &st) != 0) continue;
+
+        if (S_ISDIR(st.st_mode)) {
             (*dirs)++;
-        else
+            count_entries_r(full, files, dirs, depth + 1);
+        } else if (S_ISREG(st.st_mode)) {
             (*files)++;
+        }
     }
     closedir(d);
+}
+
+static void count_entries(const char *path, int *files, int *dirs) {
+    count_entries_r(path, files, dirs, 0);
 }
 
 static void update_file_status(VibeWindow *win) {
@@ -1100,15 +1934,21 @@ static void update_file_status(VibeWindow *win) {
         snprintf(buf, sizeof(buf), "%s@%s — %d entries", win->ssh_user, win->ssh_host, count);
         gtk_label_set_text(win->status_label, buf);
     } else {
-        int files = 0, dirs = 0;
-        count_entries(win->current_dir, &files, &dirs);
-        char buf[128];
-        snprintf(buf, sizeof(buf), "%d files, %d dirs", files, dirs);
-        gtk_label_set_text(win->status_label, buf);
+        const char *count_path = win->root_dir[0] ? win->root_dir : win->current_dir;
+        CountCtx *ctx = g_new(CountCtx, 1);
+        ctx->win = win;
+        g_strlcpy(ctx->path, count_path, sizeof(ctx->path));
+        GTask *task = g_task_new(NULL, NULL, count_finished_cb, ctx);
+        g_task_set_task_data(task, ctx, NULL);
+        g_task_run_in_thread(task, count_thread_func);
+        g_object_unref(task);
     }
 }
 
 void vibe_window_disconnect_sftp(VibeWindow *win) {
+    stop_dir_monitor(win);
+    stop_file_monitor(win);
+    ssh_ctl_stop(win);
     win->ssh_host[0] = '\0';
     win->ssh_user[0] = '\0';
     win->ssh_port = 0;
@@ -1177,6 +2017,13 @@ static void on_close_request(GtkWindow *window, gpointer data) {
 static void on_destroy(GtkWidget *widget, gpointer data) {
     (void)widget;
     VibeWindow *win = data;
+
+    /* Cancel all in-flight async operations first */
+    g_cancellable_cancel(win->cancellable);
+
+    stop_dir_monitor(win);
+    stop_file_monitor(win);
+    ssh_ctl_stop(win);
     if (win->intensity_idle_id) {
         g_source_remove(win->intensity_idle_id);
         win->intensity_idle_id = 0;
@@ -1187,6 +2034,7 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
             GTK_STYLE_PROVIDER(win->css_provider));
         g_object_unref(win->css_provider);
     }
+    g_object_unref(win->cancellable);
     g_free(win);
 }
 
@@ -1433,6 +2281,7 @@ static GtkWidget *build_menu_button(void) {
 
 VibeWindow *vibe_window_new(GtkApplication *app) {
     VibeWindow *win = g_new0(VibeWindow, 1);
+    win->cancellable = g_cancellable_new();
     settings_load(&win->settings);
 
     win->window = GTK_APPLICATION_WINDOW(gtk_application_window_new(app));

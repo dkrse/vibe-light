@@ -18,8 +18,10 @@ Vibe Light is a lightweight GTK4/libadwaita desktop application written in C17. 
 ```
 src/
   main.c         (16 lines)     Entry point, AdwApplication setup
-  window.h       (60 lines)     VibeWindow struct, public API
-  window.c       (1657 lines)   Window construction, themes, file browser,
+  window.h       (80 lines)     VibeWindow struct, public API
+  window.c       (~2300 lines)  Window construction, themes, file browser,
+                                 file system monitoring (local + remote),
+                                 SSH ControlMaster, inotifywait integration,
                                  line numbers, highlight, font intensity,
                                  SSH/SFTP file operations, remote dir chooser,
                                  prompt handler, terminal spawn
@@ -30,7 +32,7 @@ src/
                                  SFTP connection dialog, async SSH connect
 ```
 
-Total: ~2956 lines of C.
+Total: ~3500 lines of C.
 
 ## Key Data Structures
 
@@ -50,7 +52,14 @@ Central struct holding all UI state:
 - `terminal` -- VteTerminal
 - `prompt_view` / `prompt_buffer` -- Text input for prompt
 - `ssh_host`, `ssh_user`, `ssh_port`, `ssh_key`, `ssh_remote_path`, `ssh_mount` -- SSH connection state
-- `status_label` -- Status bar (file count or SFTP info)
+- `ssh_ctl_path`, `ssh_ctl_dir` -- SSH ControlMaster socket path and directory
+- `cancellable` -- GCancellable for all async operations (cancelled on window destroy)
+- `dir_monitor` -- GFileMonitor for local directory watching (inotify)
+- `file_monitor` -- GFileMonitor for local file watching (editor auto-reload)
+- `inotify_proc`, `inotify_stream` -- Remote directory watching via `ssh inotifywait`
+- `remote_dir_poll_id`, `remote_file_poll_id` -- Fallback polling timers for remote
+- `current_file` -- Path of file currently open in editor
+- `status_label` -- Status bar (recursive file/dir count or SFTP info)
 - `sftp_box`, `sftp_label`, `sftp_disconnect_btn` -- SFTP indicator in status bar
 - `cursor_label` -- Cursor position (Ln/Col)
 - `css_provider` -- Dynamic CSS for themes, fonts, and font intensity
@@ -137,6 +146,25 @@ Custom GtkTextView subclass (`VibeTextView`) overrides `snapshot()`. After the p
 - Sorted: directories first, then alphabetical (case-insensitive)
 - Remote directories listed via SSH (`ssh ls -1pA`)
 - File size limit: 10 MB
+- **Status bar** shows recursive count of all files and directories from root (computed in background thread)
+
+### Live File Watching
+
+The file browser and editor automatically react to filesystem changes:
+
+**Local (inotify):**
+- Directory changes detected via `GFileMonitor` (`g_file_monitor_directory`) -- uses kernel inotify, zero CPU when idle
+- Open file changes detected via `GFileMonitor` (`g_file_monitor_file`) -- only reacts to `CHANGES_DONE_HINT` to avoid double reload
+- All changes debounced (200ms for directory, 150ms for file) to coalesce rapid events
+- Expanded directory state preserved across refreshes (`collect_expanded_paths` / `restore_expanded`)
+
+**Remote (SSH):**
+- Primary: `ssh inotifywait -m -q -e create,delete,move,modify,attrib` -- persistent SSH subprocess streaming kernel events from the server. Instant detection, zero network traffic when idle.
+- Fallback: periodic `ssh ls -1pA` polling (2s interval) with djb2 hash comparison -- only refreshes UI when output actually changes. Used when `inotifywait` is not installed on the server.
+- Availability check: `ssh which inotifywait` runs in background thread on directory open; result determines which strategy to use.
+- Open file watching: `ssh stat -c %Y` polling (1s interval) checks mtime, reloads only on change.
+- All remote operations run in `GTask` background threads -- UI never blocks on SSH.
+- Guard flags (`dir_poll_in_flight`, `file_poll_in_flight`) prevent accumulation of overlapping poll tasks on slow networks.
 
 ## SFTP/SSH
 
@@ -148,12 +176,24 @@ No FUSE mount, no libssh. Uses system `ssh` command directly, similar to Midnigh
 - **File reading:** `ssh user@host -- cat /path` via `GSubprocess` + `g_subprocess_communicate` (binary-safe, returns `GBytes` with proper length)
 - **Connection test:** `ssh user@host -- echo ok` via `GTask` (async, doesn't block UI)
 - **Terminal:** `vte_terminal_spawn_async` with ssh as the command
+- **File watching:** `ssh inotifywait -m` via `GSubprocess` with async stdout reading, or `ssh stat -c %Y` / `ssh ls` polling via `GTask`
+
+### SSH ControlMaster
+
+On SFTP connect, a persistent SSH ControlMaster connection is established:
+
+- **Socket location:** `$XDG_RUNTIME_DIR/vibe-ssh-XXXXXX/ctl` (created via `mkdtemp`, user-private)
+- **All subsequent SSH commands** (ls, cat, stat, inotifywait, which) multiplex through this single TCP connection -- no repeated handshakes, near-zero overhead per command
+- **ControlPersist=60** -- if the app crashes, the master process auto-exits after 60 seconds (prevents orphaned sockets)
+- **Cleanup:** `ssh -O exit` sent on disconnect or window destroy; socket file and directory removed
 
 ### Security
 
 - All SSH commands use argv arrays (`g_spawn_sync` / `GSubprocess`), never shell command strings -- immune to shell injection
 - `StrictHostKeyChecking=accept-new` -- auto-accepts new hosts
 - `BatchMode=yes` -- no interactive prompts, fails immediately on auth failure
+- ControlMaster socket in `$XDG_RUNTIME_DIR` with `mkdtemp` -- unpredictable path, user-private directory (no symlink attacks)
+- ControlPersist timeout prevents orphaned SSH processes on crash
 - Connection profiles stored in `~/.config/vibe-light/connections.conf` with `0600` permissions
 - Passwords are never saved to disk (only held in memory during the connection dialog)
 
@@ -233,4 +273,8 @@ INI-style sections at `~/.config/vibe-light/connections.conf`.
 - `realloc` checked for NULL (falls back gracefully)
 - `GSubprocess` for binary-safe SSH file reading
 - `GTask` for async operations (prevents use-after-free on dialog close)
+- `GCancellable` shared across all async operations -- cancelled on window destroy, all callbacks check before accessing `VibeWindow`
+- Background threads receive copied SSH parameters (not pointers to `VibeWindow`) to avoid race conditions with disconnect
+- Guard flags prevent accumulation of overlapping async polls on slow networks
+- `count_entries` uses `lstat` (no symlink following) and depth limit (64) to prevent infinite recursion
 - File size capped at 10 MB to prevent OOM

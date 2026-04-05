@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.3.0 (2026-04-05)
+
+### Features
+
+- **Live file watching (local)** -- file browser and editor automatically update when files are created, deleted, renamed, or modified on disk (uses kernel inotify via GFileMonitor, zero CPU when idle)
+- **Live file watching (remote)** -- uses `ssh inotifywait` for instant detection on servers with inotify-tools, with automatic fallback to periodic polling
+- **SSH ControlMaster** -- persistent multiplexed SSH connection for all remote operations (ls, cat, stat, inotifywait); near-zero overhead per command
+- **Recursive file/directory count** -- status bar shows total count from root directory across all nested subdirectories (computed in background thread)
+- **Expanded directory preservation** -- file browser refresh preserves which directories were expanded
+
+### Security Fixes
+
+- **ControlMaster socket** in `$XDG_RUNTIME_DIR` via `mkdtemp` (unpredictable path, user-private)
+- **ControlPersist=60** -- SSH master auto-exits after 60s if app crashes (no orphaned sockets)
+- **Symlink loop protection** -- `count_entries` uses `lstat` (no symlink following) with depth limit of 64
+
+### Performance Fixes
+
+- **Non-blocking remote refresh** -- remote directory listing runs in background thread (UI never freezes on SSH)
+- **Debounced file reload** -- editor reacts only to `CHANGES_DONE_HINT` with 150ms debounce (prevents double reload)
+- **Poll accumulation guard** -- overlapping SSH poll tasks prevented by in-flight flags
+- **No race conditions** -- background threads receive copied SSH parameters, not pointers to main struct
+
+### Bug Fixes
+
+- **Use-after-free prevention** -- `GCancellable` shared across all async operations, cancelled on window destroy
+- **inotifywait stream null check** -- callback verifies stream is still valid before reading
+- **ssh_spawn_sync out_len** -- length computed before freeing stdout buffer
+
 ## v0.2.0 (2026-04-05)
 
 ### Features
