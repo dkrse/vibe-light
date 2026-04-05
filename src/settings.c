@@ -20,8 +20,7 @@ char *settings_get_config_path(void) {
 static double parse_double(const char *val) {
     /* locale-safe: parse "0.82" or "0,82" regardless of LC_NUMERIC */
     char buf[64];
-    strncpy(buf, val, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+    g_strlcpy(buf, val, sizeof(buf));
     for (char *p = buf; *p; p++)
         if (*p == ',') *p = '.';
 
@@ -40,26 +39,26 @@ static double parse_double(const char *val) {
 }
 
 void settings_load(VibeSettings *s) {
-    strncpy(s->theme, "system", sizeof(s->theme));
+    g_strlcpy(s->theme, "system", sizeof(s->theme));
     s->font_intensity = 1.0;
     s->line_spacing = 1.0;
 
-    strncpy(s->gui_font, "Monospace", sizeof(s->gui_font));
+    g_strlcpy(s->gui_font, "Monospace", sizeof(s->gui_font));
     s->gui_font_size = 14;
 
-    strncpy(s->browser_font, "Monospace", sizeof(s->browser_font));
+    g_strlcpy(s->browser_font, "Monospace", sizeof(s->browser_font));
     s->browser_font_size = 14;
 
-    strncpy(s->editor_font, "Monospace", sizeof(s->editor_font));
+    g_strlcpy(s->editor_font, "Monospace", sizeof(s->editor_font));
     s->editor_font_size = 14;
     s->show_line_numbers = FALSE;
     s->highlight_current_line = TRUE;
     s->wrap_lines = TRUE;
 
-    strncpy(s->terminal_font, "Monospace", sizeof(s->terminal_font));
+    g_strlcpy(s->terminal_font, "Monospace", sizeof(s->terminal_font));
     s->terminal_font_size = 14;
 
-    strncpy(s->prompt_font, "Monospace", sizeof(s->prompt_font));
+    g_strlcpy(s->prompt_font, "Monospace", sizeof(s->prompt_font));
     s->prompt_font_size = 14;
     s->prompt_send_enter = FALSE;
     s->prompt_switch_terminal = TRUE;
@@ -79,33 +78,33 @@ void settings_load(VibeSettings *s) {
         *eq = '\0';
         const char *key = line, *val = eq + 1;
 
-        if (strcmp(key, "theme") == 0) strncpy(s->theme, val, sizeof(s->theme) - 1);
+        if (strcmp(key, "theme") == 0) g_strlcpy(s->theme, val, sizeof(s->theme));
         else if (strcmp(key, "font_intensity") == 0) s->font_intensity = parse_double(val);
         else if (strcmp(key, "line_spacing") == 0) s->line_spacing = parse_double(val);
 
-        else if (strcmp(key, "gui_font") == 0) strncpy(s->gui_font, val, sizeof(s->gui_font) - 1);
+        else if (strcmp(key, "gui_font") == 0) g_strlcpy(s->gui_font, val, sizeof(s->gui_font));
         else if (strcmp(key, "gui_font_size") == 0) s->gui_font_size = atoi(val);
 
-        else if (strcmp(key, "browser_font") == 0) strncpy(s->browser_font, val, sizeof(s->browser_font) - 1);
+        else if (strcmp(key, "browser_font") == 0) g_strlcpy(s->browser_font, val, sizeof(s->browser_font));
         else if (strcmp(key, "browser_font_size") == 0) s->browser_font_size = atoi(val);
 
-        else if (strcmp(key, "editor_font") == 0) strncpy(s->editor_font, val, sizeof(s->editor_font) - 1);
+        else if (strcmp(key, "editor_font") == 0) g_strlcpy(s->editor_font, val, sizeof(s->editor_font));
         else if (strcmp(key, "editor_font_size") == 0) s->editor_font_size = atoi(val);
         else if (strcmp(key, "show_line_numbers") == 0) s->show_line_numbers = atoi(val);
         else if (strcmp(key, "highlight_current_line") == 0) s->highlight_current_line = atoi(val);
         else if (strcmp(key, "wrap_lines") == 0) s->wrap_lines = atoi(val);
 
-        else if (strcmp(key, "terminal_font") == 0) strncpy(s->terminal_font, val, sizeof(s->terminal_font) - 1);
+        else if (strcmp(key, "terminal_font") == 0) g_strlcpy(s->terminal_font, val, sizeof(s->terminal_font));
         else if (strcmp(key, "terminal_font_size") == 0) s->terminal_font_size = atoi(val);
 
-        else if (strcmp(key, "prompt_font") == 0) strncpy(s->prompt_font, val, sizeof(s->prompt_font) - 1);
+        else if (strcmp(key, "prompt_font") == 0) g_strlcpy(s->prompt_font, val, sizeof(s->prompt_font));
         else if (strcmp(key, "prompt_font_size") == 0) s->prompt_font_size = atoi(val);
         else if (strcmp(key, "prompt_send_enter") == 0) s->prompt_send_enter = atoi(val);
         else if (strcmp(key, "prompt_switch_terminal") == 0) s->prompt_switch_terminal = atoi(val);
 
         else if (strcmp(key, "window_width") == 0) s->window_width = atoi(val);
         else if (strcmp(key, "window_height") == 0) s->window_height = atoi(val);
-        else if (strcmp(key, "last_directory") == 0) strncpy(s->last_directory, val, sizeof(s->last_directory) - 1);
+        else if (strcmp(key, "last_directory") == 0) g_strlcpy(s->last_directory, val, sizeof(s->last_directory));
 
         /* backwards compat */
         else if (strcmp(key, "gui_font_intensity") == 0 ||
@@ -116,11 +115,11 @@ void settings_load(VibeSettings *s) {
             s->font_intensity = parse_double(val);
         }
         else if (strcmp(key, "font") == 0) {
-            strncpy(s->gui_font, val, sizeof(s->gui_font) - 1);
-            strncpy(s->browser_font, val, sizeof(s->browser_font) - 1);
-            strncpy(s->editor_font, val, sizeof(s->editor_font) - 1);
-            strncpy(s->terminal_font, val, sizeof(s->terminal_font) - 1);
-            strncpy(s->prompt_font, val, sizeof(s->prompt_font) - 1);
+            g_strlcpy(s->gui_font, val, sizeof(s->gui_font));
+            g_strlcpy(s->browser_font, val, sizeof(s->browser_font));
+            g_strlcpy(s->editor_font, val, sizeof(s->editor_font));
+            g_strlcpy(s->terminal_font, val, sizeof(s->terminal_font));
+            g_strlcpy(s->prompt_font, val, sizeof(s->prompt_font));
         }
         else if (strcmp(key, "font_size") == 0) {
             int v = atoi(val);
@@ -136,14 +135,77 @@ void settings_load(VibeSettings *s) {
     if (s->font_intensity > 1.0) s->font_intensity = 1.0;
 }
 
+static char *connections_get_path(void) {
+    static char path[1024];
+    snprintf(path, sizeof(path), "%s/.config/vibe-light/connections.conf", g_get_home_dir());
+    return path;
+}
+
+void connections_load(SftpConnections *c) {
+    memset(c, 0, sizeof(*c));
+    FILE *f = fopen(connections_get_path(), "r");
+    if (!f) return;
+
+    char line[4096];
+    int idx = -1;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        if (line[0] == '[') {
+            idx++;
+            if (idx >= MAX_CONNECTIONS) break;
+            c->count = idx + 1;
+            /* parse name from [name] */
+            char *end = strchr(line, ']');
+            if (end) *end = '\0';
+            g_strlcpy(c->items[idx].name, line + 1, sizeof(c->items[idx].name));
+            c->items[idx].port = 22;
+            continue;
+        }
+        if (idx < 0 || idx >= MAX_CONNECTIONS) continue;
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        const char *key = line, *val = eq + 1;
+        SftpConnection *s = &c->items[idx];
+        if (strcmp(key, "host") == 0) g_strlcpy(s->host, val, sizeof(s->host));
+        else if (strcmp(key, "port") == 0) s->port = atoi(val);
+        else if (strcmp(key, "user") == 0) g_strlcpy(s->user, val, sizeof(s->user));
+        else if (strcmp(key, "remote_path") == 0) g_strlcpy(s->remote_path, val, sizeof(s->remote_path));
+        else if (strcmp(key, "use_key") == 0) s->use_key = atoi(val);
+        else if (strcmp(key, "key_path") == 0) g_strlcpy(s->key_path, val, sizeof(s->key_path));
+    }
+    fclose(f);
+}
+
+void connections_save(const SftpConnections *c) {
+    ensure_config_dir();
+    FILE *f = fopen(connections_get_path(), "w");
+    if (!f) return;
+    /* restrict permissions — contains hostnames, usernames, key paths */
+    fchmod(fileno(f), 0600);
+    for (int i = 0; i < c->count; i++) {
+        const SftpConnection *s = &c->items[i];
+        fprintf(f, "[%s]\n", s->name);
+        fprintf(f, "host=%s\n", s->host);
+        fprintf(f, "port=%d\n", s->port);
+        fprintf(f, "user=%s\n", s->user);
+        fprintf(f, "remote_path=%s\n", s->remote_path);
+        fprintf(f, "use_key=%d\n", s->use_key);
+        fprintf(f, "key_path=%s\n", s->key_path);
+        fprintf(f, "\n");
+    }
+    fclose(f);
+}
+
 void settings_save(const VibeSettings *s) {
     ensure_config_dir();
     FILE *f = fopen(settings_get_config_path(), "w");
     if (!f) return;
+    fchmod(fileno(f), 0600);
 
     char *prev = setlocale(LC_NUMERIC, NULL);
     char saved_locale[64] = "";
-    if (prev) strncpy(saved_locale, prev, sizeof(saved_locale) - 1);
+    if (prev) g_strlcpy(saved_locale, prev, sizeof(saved_locale));
     setlocale(LC_NUMERIC, "C");
 
     fprintf(f, "theme=%s\n", s->theme);
