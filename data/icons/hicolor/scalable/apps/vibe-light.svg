@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#6C63FF"/>
+      <stop offset="100%" stop-color="#3B35B0"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1E1E2E"/>
+      <stop offset="100%" stop-color="#181825"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded square background -->
+  <rect x="4" y="4" width="120" height="120" rx="24" ry="24" fill="url(#bg)"/>
+  <!-- Inner screen area -->
+  <rect x="16" y="22" width="96" height="84" rx="8" ry="8" fill="url(#screen)"/>
+  <!-- Title bar dots -->
+  <circle cx="28" cy="32" r="3" fill="#FF5F56"/>
+  <circle cx="38" cy="32" r="3" fill="#FFBD2E"/>
+  <circle cx="48" cy="32" r="3" fill="#27C93F"/>
+  <!-- Terminal prompt line 1 -->
+  <text x="24" y="58" font-family="monospace" font-size="14" font-weight="bold" fill="#A6E3A1">$</text>
+  <text x="36" y="58" font-family="monospace" font-size="13" fill="#CDD6F4">~/files</text>
+  <!-- File tree lines -->
+  <text x="24" y="74" font-family="monospace" font-size="11" fill="#89B4FA">├─</text>
+  <text x="44" y="74" font-family="monospace" font-size="11" fill="#F9E2AF">src/</text>
+  <text x="24" y="88" font-family="monospace" font-size="11" fill="#89B4FA">├─</text>
+  <text x="44" y="88" font-family="monospace" font-size="11" fill="#CDD6F4">main.c</text>
+  <text x="24" y="102" font-family="monospace" font-size="11" fill="#89B4FA">└─</text>
+  <text x="44" y="102" font-family="monospace" font-size="11" fill="#A6E3A1">▶ run</text>
+</svg>
