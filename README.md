@@ -100,6 +100,10 @@ SFTP connections are stored in `~/.config/vibe-light/connections.conf` (INI form
 - [Dependencies](docs/dependencies.md)
 - [Changelog](docs/changelog.md)
 
+## Author
+
+krse
+
 ## License
 
 MIT
