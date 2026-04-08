@@ -7,8 +7,10 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <stdlib.h>
+#include <math.h>
 #include <pwd.h>
 #include <unistd.h>
+
 
 /* ── Theme CSS ── */
 
@@ -445,7 +447,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
              ".path-bar{font-family:%s;font-size:%dpt}"
              ".statusbar label{font-family:%s;font-size:%dpt}"
              /* per-section fonts */
-             ".file-viewer{font-family:%s;font-size:%dpt;caret-color:%s}"
+             ".file-viewer{font-family:%s;font-size:%dpt;font-weight:%d;caret-color:%s}"
              ".file-browser{font-family:%s;font-size:%dpt}"
              ".file-browser label{color:%s}"
              ".prompt-view{font-family:%s;font-size:%dpt;caret-color:%s}"
@@ -459,7 +461,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
              "popover>contents,popover.menu>contents{color:%s}"
              "window label{color:%s}"
              "window checkbutton label{color:%s}"
-             ".line-numbers,.line-numbers text{font-family:%s;font-size:%dpt;color:%s}",
+             ".line-numbers,.line-numbers text{font-family:%s;font-size:%dpt;font-weight:%d;color:%s}",
              /* GUI font args */
              win->settings.gui_font, win->settings.gui_font_size,
              win->settings.gui_font, win->settings.gui_font_size,
@@ -469,7 +471,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
              win->settings.gui_font, win->settings.gui_font_size,
              win->settings.gui_font, win->settings.gui_font_size,
              /* per-section font args */
-             win->settings.editor_font, win->settings.editor_font_size, fg_full,
+             win->settings.editor_font, win->settings.editor_font_size, win->settings.editor_font_weight, fg_full,
              win->settings.browser_font, win->settings.browser_font_size,
              fg_full,
              win->settings.prompt_font, win->settings.prompt_font_size, fg_full,
@@ -484,7 +486,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
              fg_full,
              fg_full,
              win->settings.editor_font, win->settings.editor_font_size,
-             fg_dim);
+             win->settings.editor_font_weight, fg_dim);
 
     char full_css[16384];
     snprintf(full_css, sizeof(full_css), "%s%s", theme_css, font_css);
@@ -1623,14 +1625,19 @@ void vibe_window_set_root_directory(VibeWindow *win, const char *path) {
         g_ptr_array_free(av, TRUE);
         fprintf(stderr, "SETROOT: ssh terminal spawned\n");
     } else {
-        /* local shell */
+        /* local shell — wrapped in `script` for terminal logging */
         const char *shell = g_getenv("SHELL");
         if (!shell) {
             struct passwd *pw = getpwuid(getuid());
             shell = (pw && pw->pw_shell) ? pw->pw_shell : "/bin/sh";
         }
-        char *argv[] = {(char *)shell, NULL};
 
+        /* Ensure .LLM directory exists */
+        char llmdir[2200];
+        snprintf(llmdir, sizeof(llmdir), "%s/.LLM", path);
+        g_mkdir_with_parents(llmdir, 0755);
+
+        char *argv[] = {(char *)shell, NULL};
         vte_terminal_spawn_async(
             win->terminal, VTE_PTY_DEFAULT, path,
             argv, NULL, G_SPAWN_DEFAULT,
@@ -1833,18 +1840,345 @@ static gboolean on_editor_key(GtkEventControllerKey *ctrl, guint keyval,
 
 /* ── Prompt key handler ── */
 
-static void send_prompt_to_terminal(VibeWindow *win) {
+/* Escape string for JSON. Caller must g_free. */
+static char *json_escape(const char *s) {
+    if (!s) return g_strdup("");
+    GString *out = g_string_new(NULL);
+    for (const char *p = s; *p; p++) {
+        switch (*p) {
+            case '"':  g_string_append(out, "\\\""); break;
+            case '\\': g_string_append(out, "\\\\"); break;
+            case '\n': g_string_append(out, "\\n");  break;
+            case '\r': g_string_append(out, "\\r");  break;
+            case '\t': g_string_append(out, "\\t");  break;
+            default:
+                if ((unsigned char)*p < 0x20)
+                    g_string_append_printf(out, "\\u%04x", (unsigned)*p);
+                else
+                    g_string_append_c(out, *p);
+        }
+    }
+    return g_string_free(out, FALSE);
+}
+
+/* Append a prompt entry to .LLM/prompts.json */
+static void log_prompt_json(VibeWindow *win, const char *prompt) {
+    if (!win->root_dir[0]) return;
+
+    char llmdir[2200];
+    snprintf(llmdir, sizeof(llmdir), "%s/.LLM", win->root_dir);
+    g_mkdir_with_parents(llmdir, 0755);
+
+    char jpath[2200];
+    snprintf(jpath, sizeof(jpath), "%s/.LLM/prompts.json", win->root_dir);
+
+    /* Read existing file to find next id and insert before closing ] */
+    char *existing = NULL;
+    gsize len = 0;
+    gboolean have_file = g_file_get_contents(jpath, &existing, &len, NULL);
+
+    int next_id = 0;
+    if (have_file && existing) {
+        const char *p = existing;
+        while ((p = strstr(p, "\"id\":")) != NULL) {
+            p += 5;
+            while (*p == ' ') p++;
+            int v = atoi(p);
+            if (v >= next_id) next_id = v + 1;
+        }
+    }
+
+    /* Timestamp */
+    GDateTime *now = g_date_time_new_now_local();
+    char *ts = g_date_time_format(now, "%Y-%m-%d %H:%M:%S");
+    g_date_time_unref(now);
+
+    char *ep = json_escape(prompt);
+
+    FILE *f = fopen(jpath, "w");
+    if (!f) { g_free(ep); g_free(ts); g_free(existing); return; }
+
+    if (have_file && len > 2) {
+        char *last = strrchr(existing, ']');
+        if (last) {
+            fwrite(existing, 1, (size_t)(last - existing), f);
+            fprintf(f, ",\n  {\"id\": %d, \"timestamp\": \"%s\", \"prompt\": \"%s\"}\n]\n",
+                    next_id, ts, ep);
+        } else {
+            fprintf(f, "[\n  {\"id\": %d, \"timestamp\": \"%s\", \"prompt\": \"%s\"}\n]\n",
+                    next_id, ts, ep);
+        }
+    } else {
+        fprintf(f, "[\n  {\"id\": %d, \"timestamp\": \"%s\", \"prompt\": \"%s\"}\n]\n",
+                next_id, ts, ep);
+    }
+
+    fclose(f);
+    g_free(ep);
+    g_free(ts);
+    g_free(existing);
+}
+
+/* Parse JSON response from claude --output-format json */
+static void ai_parse_and_display(VibeWindow *win) {
+    const char *json = win->ai_response_buf->str;
+
+    /* Extract "result" field value */
+    const char *result_key = "\"result\":\"";
+    const char *rp = strstr(json, result_key);
+    GString *result_text = g_string_new(NULL);
+    if (rp) {
+        rp += strlen(result_key);
+        while (*rp && !(rp[0] == '"' && rp[-1] != '\\')) {
+            if (rp[0] == '\\' && rp[1]) {
+                switch (rp[1]) {
+                    case 'n': g_string_append_c(result_text, '\n'); break;
+                    case 't': g_string_append_c(result_text, '\t'); break;
+                    case '"': g_string_append_c(result_text, '"'); break;
+                    case '\\': g_string_append_c(result_text, '\\'); break;
+                    default: g_string_append_c(result_text, rp[1]); break;
+                }
+                rp += 2;
+            } else {
+                g_string_append_c(result_text, *rp);
+                rp++;
+            }
+        }
+    } else {
+        /* Fallback: show raw output */
+        g_string_append(result_text, json);
+    }
+
+    /* Display result in output view */
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(win->ai_output_buffer, &end);
+    gtk_text_buffer_insert(win->ai_output_buffer, &end, result_text->str, result_text->len);
+    gtk_text_buffer_insert(win->ai_output_buffer, &end, "\n\n", 2);
+    g_string_free(result_text, TRUE);
+
+    /* Scroll to bottom */
+    gtk_text_buffer_get_end_iter(win->ai_output_buffer, &end);
+    GtkTextMark *mark = gtk_text_buffer_get_insert(win->ai_output_buffer);
+    gtk_text_buffer_move_mark(win->ai_output_buffer, mark, &end);
+    gtk_text_view_scroll_mark_onscreen(win->ai_output_view, mark);
+
+    /* Extract session_id for --resume */
+    const char *sid_key = "\"session_id\":\"";
+    const char *sp = strstr(json, sid_key);
+    if (sp) {
+        sp += strlen(sid_key);
+        const char *se = strchr(sp, '"');
+        if (se && (se - sp) < 127) {
+            memcpy(win->ai_session_id, sp, se - sp);
+            win->ai_session_id[se - sp] = '\0';
+        }
+    }
+
+    /* Extract model name for status */
+    const char *mu = strstr(json, "\"modelUsage\":{\"");
+    char model[128] = "unknown";
+    if (mu) {
+        mu += strlen("\"modelUsage\":{\"");
+        const char *me = strchr(mu, '"');
+        if (me && (me - mu) < 127) {
+            memcpy(model, mu, me - mu);
+            model[me - mu] = '\0';
+        }
+    }
+
+    gtk_label_set_text(win->ai_status_label, model);
+
+    /* Compute elapsed time */
+    gint64 now = g_get_monotonic_time();
+    win->ai_last_elapsed = (now - win->ai_start_time) / 1e6;
+
+    /* Extract token usage: "inputTokens":N and "outputTokens":N */
+    const char *it = strstr(json, "\"inputTokens\":");
+    if (it) {
+        it += strlen("\"inputTokens\":");
+        win->ai_input_tokens += atoi(it);
+    }
+    const char *ot = strstr(json, "\"outputTokens\":");
+    if (ot) {
+        ot += strlen("\"outputTokens\":");
+        win->ai_output_tokens += atoi(ot);
+    }
+
+
+    /* Update token label with dynamic formatting */
+    {
+        char in_s[16], out_s[16], tot_s[16], time_s[32];
+        int total = win->ai_input_tokens + win->ai_output_tokens;
+
+        #define FMT_TOK(buf, n) do { \
+            if ((n) >= 1000000) snprintf(buf, sizeof(buf), "%.1fM", (n)/1e6); \
+            else if ((n) >= 1000) snprintf(buf, sizeof(buf), "%.1fk", (n)/1e3); \
+            else snprintf(buf, sizeof(buf), "%d", (n)); \
+        } while(0)
+
+        FMT_TOK(in_s, win->ai_input_tokens);
+        FMT_TOK(out_s, win->ai_output_tokens);
+        FMT_TOK(tot_s, total);
+        #undef FMT_TOK
+
+        if (win->ai_last_elapsed >= 60.0)
+            snprintf(time_s, sizeof(time_s), "%.0fm%.0fs",
+                     win->ai_last_elapsed / 60.0,
+                     fmod(win->ai_last_elapsed, 60.0));
+        else
+            snprintf(time_s, sizeof(time_s), "%.1fs", win->ai_last_elapsed);
+
+        char tok_str[256];
+        snprintf(tok_str, sizeof(tok_str), "%s  |  in: %s  out: %s  total: %s",
+                 time_s, in_s, out_s, tot_s);
+        gtk_label_set_text(win->ai_token_label, tok_str);
+    }
+}
+
+/* Called when claude process finishes and all stdout is available */
+static void on_ai_communicate_done(GObject *src, GAsyncResult *res, gpointer data) {
+    VibeWindow *win = data;
+    GBytes *stdout_bytes = NULL;
+    GError *err = NULL;
+
+    g_subprocess_communicate_finish(G_SUBPROCESS(src), res, &stdout_bytes, NULL, &err);
+
+    if (stdout_bytes) {
+        gsize len;
+        const char *json = g_bytes_get_data(stdout_bytes, &len);
+        g_string_truncate(win->ai_response_buf, 0);
+        g_string_append_len(win->ai_response_buf, json, len);
+        g_bytes_unref(stdout_bytes);
+        ai_parse_and_display(win);
+    } else if (err) {
+        GtkTextIter end;
+        gtk_text_buffer_get_end_iter(win->ai_output_buffer, &end);
+        char *msg = g_strdup_printf("Error: %s\n", err->message);
+        gtk_text_buffer_insert(win->ai_output_buffer, &end, msg, -1);
+        g_free(msg);
+        g_error_free(err);
+    }
+
+    g_clear_object(&win->ai_proc);
+}
+
+static void send_prompt_to_ai(VibeWindow *win) {
     GtkTextIter start, end;
     gtk_text_buffer_get_bounds(win->prompt_buffer, &start, &end);
     char *text = gtk_text_buffer_get_text(win->prompt_buffer, &start, &end, FALSE);
 
-    if (text && text[0]) {
-        vte_terminal_feed_child(win->terminal, text, strlen(text));
-        vte_terminal_feed_child(win->terminal, "\n", 1);
-        gtk_text_buffer_set_text(win->prompt_buffer, "", -1);
-        if (win->settings.prompt_switch_terminal)
-            gtk_notebook_set_current_page(win->notebook, 1);
+    if (!text || !text[0]) { g_free(text); return; }
+
+    /* Don't send if a process is already running */
+    if (win->ai_proc) {
+        g_free(text);
+        return;
     }
+
+    /* Log prompt to JSON */
+    log_prompt_json(win, text);
+
+    /* Show prompt in output view */
+    GtkTextIter out_end;
+    gtk_text_buffer_get_end_iter(win->ai_output_buffer, &out_end);
+    char *prompt_line = g_strdup_printf(">>> %s\n\n", text);
+    gtk_text_buffer_insert(win->ai_output_buffer, &out_end, prompt_line, -1);
+    g_free(prompt_line);
+
+    /* Update status + start timer */
+    gtk_label_set_text(win->ai_status_label, "thinking...");
+    win->ai_start_time = g_get_monotonic_time();
+
+    /* Spawn: claude -p "text" --output-format json [--resume SESSION_ID]
+     * Model is NOT passed — uses whatever the user configured via
+     * "claude config set model ..." in the terminal.                  */
+    GError *err = NULL;
+
+    GPtrArray *argv = g_ptr_array_new();
+    g_ptr_array_add(argv, (gpointer)"claude");
+    g_ptr_array_add(argv, (gpointer)"-p");
+    g_ptr_array_add(argv, (gpointer)text);
+    if (win->ai_session_id[0]) {
+        g_ptr_array_add(argv, (gpointer)"--resume");
+        g_ptr_array_add(argv, (gpointer)win->ai_session_id);
+    }
+    /* Restrict to CWD unless full disk access is enabled */
+    static char restrict_prompt[4096];
+    if (!win->settings.ai_full_disk_access) {
+        const char *cwd = win->ai_cwd[0] ? win->ai_cwd : win->root_dir;
+        if (cwd[0]) {
+            snprintf(restrict_prompt, sizeof(restrict_prompt),
+                "IMPORTANT: You must ONLY read, write, and modify files within "
+                "the directory '%s' and its subdirectories. "
+                "Do NOT access any files or directories outside of it.", cwd);
+            g_ptr_array_add(argv, (gpointer)"--system-prompt");
+            g_ptr_array_add(argv, (gpointer)restrict_prompt);
+        }
+    }
+    g_ptr_array_add(argv, (gpointer)"--output-format");
+    g_ptr_array_add(argv, (gpointer)"json");
+    /* Add only the tools the user has enabled */
+    gboolean any_tool = win->settings.ai_tool_read || win->settings.ai_tool_edit ||
+                         win->settings.ai_tool_write || win->settings.ai_tool_glob ||
+                         win->settings.ai_tool_grep || win->settings.ai_tool_bash;
+    if (any_tool) {
+        g_ptr_array_add(argv, (gpointer)"--allowed-tools");
+        if (win->settings.ai_tool_edit)  g_ptr_array_add(argv, (gpointer)"Edit");
+        if (win->settings.ai_tool_write) g_ptr_array_add(argv, (gpointer)"Write");
+        if (win->settings.ai_tool_read)  g_ptr_array_add(argv, (gpointer)"Read");
+        if (win->settings.ai_tool_glob)  g_ptr_array_add(argv, (gpointer)"Glob");
+        if (win->settings.ai_tool_grep)  g_ptr_array_add(argv, (gpointer)"Grep");
+        if (win->settings.ai_tool_bash)  g_ptr_array_add(argv, (gpointer)"Bash");
+    }
+    g_ptr_array_add(argv, NULL);
+
+    GSubprocessLauncher *launcher = g_subprocess_launcher_new(
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE);
+
+    /* Use terminal's CWD as working directory for claude */
+    const char *term_uri = vte_terminal_get_termprop_string(win->terminal, VTE_TERMPROP_CURRENT_DIRECTORY_URI, NULL);
+    if (term_uri) {
+        /* URI is file:///path — extract path */
+        GFile *f = g_file_new_for_uri(term_uri);
+        char *path = g_file_get_path(f);
+        if (path) {
+            g_strlcpy(win->ai_cwd, path, sizeof(win->ai_cwd));
+            g_subprocess_launcher_set_cwd(launcher, path);
+            g_free(path);
+        }
+        g_object_unref(f);
+    } else if (win->root_dir[0]) {
+        /* Fallback to opened folder */
+        g_strlcpy(win->ai_cwd, win->root_dir, sizeof(win->ai_cwd));
+        g_subprocess_launcher_set_cwd(launcher, win->root_dir);
+    }
+
+    win->ai_proc = g_subprocess_launcher_spawnv(launcher,
+        (const gchar * const *)argv->pdata, &err);
+    g_object_unref(launcher);
+    g_ptr_array_unref(argv);
+
+    if (!win->ai_proc) {
+        gtk_text_buffer_get_end_iter(win->ai_output_buffer, &out_end);
+        char *errmsg = g_strdup_printf("Error: %s\n", err ? err->message : "unknown");
+        gtk_text_buffer_insert(win->ai_output_buffer, &out_end, errmsg, -1);
+        g_free(errmsg);
+        if (err) g_error_free(err);
+        g_free(text);
+        gtk_label_set_text(win->ai_status_label, "error");
+        return;
+    }
+
+    /* Init response buffer */
+    if (!win->ai_response_buf)
+        win->ai_response_buf = g_string_new(NULL);
+    g_string_truncate(win->ai_response_buf, 0);
+
+    /* Read all stdout async — fires callback when process exits */
+    g_subprocess_communicate_async(win->ai_proc, NULL, win->cancellable,
+                                    on_ai_communicate_done, win);
+
+    gtk_text_buffer_set_text(win->prompt_buffer, "", -1);
     g_free(text);
 }
 
@@ -1855,12 +2189,10 @@ static gboolean on_prompt_key(GtkEventControllerKey *ctrl, guint keyval,
 
     if (keyval == GDK_KEY_Return) {
         if (win->settings.prompt_send_enter && !(state & GDK_CONTROL_MASK)) {
-            /* Enter sends (without Ctrl) */
-            send_prompt_to_terminal(win);
+            send_prompt_to_ai(win);
             return TRUE;
         } else if (!win->settings.prompt_send_enter && (state & GDK_CONTROL_MASK)) {
-            /* Ctrl+Enter sends */
-            send_prompt_to_terminal(win);
+            send_prompt_to_ai(win);
             return TRUE;
         }
     }
@@ -2007,6 +2339,7 @@ static void update_status_bar(VibeWindow *win) {
 static void on_close_request(GtkWindow *window, gpointer data) {
     (void)window;
     VibeWindow *win = data;
+
     int w, h;
     gtk_window_get_default_size(GTK_WINDOW(win->window), &w, &h);
     win->settings.window_width = w;
@@ -2020,6 +2353,13 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
 
     /* Cancel all in-flight async operations first */
     g_cancellable_cancel(win->cancellable);
+
+    /* Clean up AI process */
+    if (win->ai_response_buf) { g_string_free(win->ai_response_buf, TRUE); win->ai_response_buf = NULL; }
+    if (win->ai_proc) {
+        g_subprocess_force_exit(win->ai_proc);
+        g_clear_object(&win->ai_proc);
+    }
 
     stop_dir_monitor(win);
     stop_file_monitor(win);
@@ -2270,6 +2610,7 @@ static GtkWidget *build_menu_button(void) {
     GMenu *menu = g_menu_new();
     g_menu_append(menu, "Open Folder", "win.open-folder");
     g_menu_append(menu, "SFTP/SSH", "win.sftp");
+    g_menu_append(menu, "AI Model", "win.ai-model");
     g_menu_append(menu, "Settings", "win.settings");
 
     GtkWidget *btn = gtk_menu_button_new();
@@ -2358,7 +2699,6 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     gtk_text_view_set_left_margin(win->file_view, 12);
     gtk_text_view_set_right_margin(win->file_view, 12);
     gtk_text_view_set_top_margin(win->file_view, 8);
-    gtk_text_view_set_monospace(win->file_view, TRUE);
     gtk_widget_add_css_class(GTK_WIDGET(win->file_view), "file-viewer");
 
     /* Intensity tag for font opacity */
@@ -2400,7 +2740,7 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
 
     gtk_notebook_append_page(win->notebook, paned, gtk_label_new("Files"));
 
-    /* ── Tab 2: Terminal ── */
+    /* ── Tab 2: Terminal (plain, for interactive shell) ── */
     win->terminal = VTE_TERMINAL(vte_terminal_new());
     vte_terminal_set_scroll_on_output(win->terminal, TRUE);
     vte_terminal_set_scrollback_lines(win->terminal, 10000);
@@ -2412,11 +2752,58 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
 
     gtk_notebook_append_page(win->notebook, term_scroll, gtk_label_new("Terminal"));
 
-    /* ── Tab 3: Prompt ── */
-    GtkWidget *prompt_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    /* ── Tab 3: AI-model (status + output + prompt) ── */
+    GtkWidget *ai_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
+    /* Status bar: model + tokens */
+    GtkWidget *ai_status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_margin_start(ai_status_bar, 8);
+    gtk_widget_set_margin_end(ai_status_bar, 8);
+    gtk_widget_set_margin_top(ai_status_bar, 4);
+    gtk_widget_set_margin_bottom(ai_status_bar, 4);
+
+    win->ai_status_label = GTK_LABEL(gtk_label_new("ready"));
+    gtk_label_set_xalign(win->ai_status_label, 0);
+    gtk_widget_add_css_class(GTK_WIDGET(win->ai_status_label), "dim-label");
+    gtk_box_append(GTK_BOX(ai_status_bar), GTK_WIDGET(win->ai_status_label));
+
+    win->ai_token_label = GTK_LABEL(gtk_label_new("in: 0  out: 0  total: 0"));
+    gtk_label_set_xalign(win->ai_token_label, 1);
+    gtk_widget_set_hexpand(GTK_WIDGET(win->ai_token_label), TRUE);
+    gtk_widget_add_css_class(GTK_WIDGET(win->ai_token_label), "dim-label");
+    gtk_box_append(GTK_BOX(ai_status_bar), GTK_WIDGET(win->ai_token_label));
+
+    gtk_box_append(GTK_BOX(ai_box), ai_status_bar);
+    gtk_box_append(GTK_BOX(ai_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+
+    /* Output view: read-only, shows conversation */
+    GtkWidget *ai_paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
+    gtk_widget_set_vexpand(ai_paned, TRUE);
+    gtk_paned_set_resize_start_child(GTK_PANED(ai_paned), TRUE);
+    gtk_paned_set_resize_end_child(GTK_PANED(ai_paned), FALSE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(ai_paned), FALSE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(ai_paned), FALSE);
+
+    win->ai_output_view = GTK_TEXT_VIEW(gtk_text_view_new());
+    win->ai_output_buffer = gtk_text_view_get_buffer(win->ai_output_view);
+    gtk_text_view_set_editable(win->ai_output_view, FALSE);
+    gtk_text_view_set_cursor_visible(win->ai_output_view, FALSE);
+    gtk_text_view_set_wrap_mode(win->ai_output_view, GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_left_margin(win->ai_output_view, 8);
+    gtk_text_view_set_right_margin(win->ai_output_view, 8);
+    gtk_text_view_set_top_margin(win->ai_output_view, 8);
+    gtk_text_view_set_monospace(win->ai_output_view, TRUE);
+    gtk_widget_add_css_class(GTK_WIDGET(win->ai_output_view), "prompt-view");
+
+    GtkWidget *ai_output_scroll = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(ai_output_scroll, TRUE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(ai_output_scroll),
+                                   GTK_WIDGET(win->ai_output_view));
+    gtk_paned_set_start_child(GTK_PANED(ai_paned), ai_output_scroll);
+
+    /* Prompt input */
     GtkWidget *prompt_scroll = gtk_scrolled_window_new();
-    gtk_widget_set_vexpand(prompt_scroll, TRUE);
+    gtk_widget_set_size_request(prompt_scroll, -1, 80);
     win->prompt_view = GTK_TEXT_VIEW(gtk_text_view_new());
     win->prompt_buffer = gtk_text_view_get_buffer(win->prompt_view);
     gtk_text_view_set_wrap_mode(win->prompt_view, GTK_WRAP_WORD_CHAR);
@@ -2429,13 +2816,15 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
                                                             "foreground-rgba", NULL, NULL);
     g_signal_connect(win->prompt_buffer, "changed", G_CALLBACK(on_prompt_buffer_changed), win);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(prompt_scroll), GTK_WIDGET(win->prompt_view));
-    gtk_box_append(GTK_BOX(prompt_box), prompt_scroll);
 
     GtkEventController *key_ctrl = gtk_event_controller_key_new();
     g_signal_connect(key_ctrl, "key-pressed", G_CALLBACK(on_prompt_key), win);
     gtk_widget_add_controller(GTK_WIDGET(win->prompt_view), key_ctrl);
 
-    gtk_notebook_append_page(win->notebook, prompt_box, gtk_label_new("Prompt"));
+    gtk_paned_set_end_child(GTK_PANED(ai_paned), prompt_scroll);
+    gtk_box_append(GTK_BOX(ai_box), ai_paned);
+
+    gtk_notebook_append_page(win->notebook, ai_box, gtk_label_new("AI-model"));
 
     /* Status bar */
     GtkWidget *status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);

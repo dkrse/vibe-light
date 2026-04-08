@@ -27,6 +27,24 @@ typedef struct {
     /* Tab 2: Terminal */
     VteTerminal          *terminal;
 
+    /* Tab 3: AI-model (output view + prompt input) */
+    GtkTextView          *ai_output_view;
+    GtkTextBuffer        *ai_output_buffer;
+    GtkLabel             *ai_status_label;   /* model info */
+    GSubprocess          *ai_proc;           /* running claude process */
+    GString              *ai_response_buf;   /* accumulates full JSON response */
+    char                  ai_session_id[128]; /* session ID for --resume */
+
+    /* AI working directory (from terminal CWD) */
+    char                  ai_cwd[2048];
+
+    /* Token / stats tracking */
+    int                   ai_input_tokens;    /* total input tokens this session */
+    int                   ai_output_tokens;   /* total output tokens this session */
+    gint64                ai_start_time;      /* monotonic µs when prompt was sent */
+    double                ai_last_elapsed;    /* seconds for last request */
+    GtkLabel             *ai_token_label;     /* token display in AI tab */
+
     /* SSH state (for remote terminal + file browsing) */
     char                  ssh_host[256];
     char                  ssh_user[128];
@@ -59,7 +77,7 @@ typedef struct {
     guint32               remote_dir_hash;      /* hash of last ls output */
     gint64                remote_file_mtime;    /* mtime of open file */
 
-    /* Tab 3: Prompt */
+    /* Tab 3: Prompt input */
     GtkTextView          *prompt_view;
     GtkTextBuffer        *prompt_buffer;
     GtkTextTag           *prompt_intensity_tag;

@@ -51,6 +51,7 @@ void settings_load(VibeSettings *s) {
 
     g_strlcpy(s->editor_font, "Monospace", sizeof(s->editor_font));
     s->editor_font_size = 14;
+    s->editor_font_weight = 400;
     s->show_line_numbers = FALSE;
     s->highlight_current_line = TRUE;
     s->wrap_lines = TRUE;
@@ -62,6 +63,14 @@ void settings_load(VibeSettings *s) {
     s->prompt_font_size = 14;
     s->prompt_send_enter = FALSE;
     s->prompt_switch_terminal = TRUE;
+
+    s->ai_full_disk_access = FALSE;
+    s->ai_tool_read = TRUE;
+    s->ai_tool_edit = TRUE;
+    s->ai_tool_write = TRUE;
+    s->ai_tool_glob = TRUE;
+    s->ai_tool_grep = TRUE;
+    s->ai_tool_bash = TRUE;
 
     s->window_width = 900;
     s->window_height = 600;
@@ -90,6 +99,7 @@ void settings_load(VibeSettings *s) {
 
         else if (strcmp(key, "editor_font") == 0) g_strlcpy(s->editor_font, val, sizeof(s->editor_font));
         else if (strcmp(key, "editor_font_size") == 0) s->editor_font_size = atoi(val);
+        else if (strcmp(key, "editor_font_weight") == 0) s->editor_font_weight = atoi(val);
         else if (strcmp(key, "show_line_numbers") == 0) s->show_line_numbers = atoi(val);
         else if (strcmp(key, "highlight_current_line") == 0) s->highlight_current_line = atoi(val);
         else if (strcmp(key, "wrap_lines") == 0) s->wrap_lines = atoi(val);
@@ -101,6 +111,15 @@ void settings_load(VibeSettings *s) {
         else if (strcmp(key, "prompt_font_size") == 0) s->prompt_font_size = atoi(val);
         else if (strcmp(key, "prompt_send_enter") == 0) s->prompt_send_enter = atoi(val);
         else if (strcmp(key, "prompt_switch_terminal") == 0) s->prompt_switch_terminal = atoi(val);
+
+
+        else if (strcmp(key, "ai_full_disk_access") == 0) s->ai_full_disk_access = atoi(val);
+        else if (strcmp(key, "ai_tool_read") == 0) s->ai_tool_read = atoi(val);
+        else if (strcmp(key, "ai_tool_edit") == 0) s->ai_tool_edit = atoi(val);
+        else if (strcmp(key, "ai_tool_write") == 0) s->ai_tool_write = atoi(val);
+        else if (strcmp(key, "ai_tool_glob") == 0) s->ai_tool_glob = atoi(val);
+        else if (strcmp(key, "ai_tool_grep") == 0) s->ai_tool_grep = atoi(val);
+        else if (strcmp(key, "ai_tool_bash") == 0) s->ai_tool_bash = atoi(val);
 
         else if (strcmp(key, "window_width") == 0) s->window_width = atoi(val);
         else if (strcmp(key, "window_height") == 0) s->window_height = atoi(val);
@@ -130,9 +149,23 @@ void settings_load(VibeSettings *s) {
     }
     fclose(f);
 
-    /* clamp intensity to valid range */
+    /* clamp / fix invalid values */
     if (s->font_intensity < 0.3) s->font_intensity = 0.3;
     if (s->font_intensity > 1.0) s->font_intensity = 1.0;
+    if (s->line_spacing < 1.0) s->line_spacing = 1.0;
+
+    /* restore defaults for empty/zero font fields */
+    if (!s->gui_font[0])      g_strlcpy(s->gui_font, "Monospace", sizeof(s->gui_font));
+    if (s->gui_font_size < 6)  s->gui_font_size = 14;
+    if (!s->browser_font[0])   g_strlcpy(s->browser_font, "Monospace", sizeof(s->browser_font));
+    if (s->browser_font_size < 6) s->browser_font_size = 14;
+    if (!s->editor_font[0])    g_strlcpy(s->editor_font, "Monospace", sizeof(s->editor_font));
+    if (s->editor_font_size < 6)  s->editor_font_size = 14;
+    if (s->editor_font_weight < 100) s->editor_font_weight = 400;
+    if (!s->terminal_font[0])  g_strlcpy(s->terminal_font, "Monospace", sizeof(s->terminal_font));
+    if (s->terminal_font_size < 6) s->terminal_font_size = 14;
+    if (!s->prompt_font[0])    g_strlcpy(s->prompt_font, "Monospace", sizeof(s->prompt_font));
+    if (s->prompt_font_size < 6)  s->prompt_font_size = 14;
 }
 
 static char *connections_get_path(void) {
@@ -220,6 +253,7 @@ void settings_save(const VibeSettings *s) {
 
     fprintf(f, "editor_font=%s\n", s->editor_font);
     fprintf(f, "editor_font_size=%d\n", s->editor_font_size);
+    fprintf(f, "editor_font_weight=%d\n", s->editor_font_weight);
     fprintf(f, "show_line_numbers=%d\n", s->show_line_numbers);
     fprintf(f, "highlight_current_line=%d\n", s->highlight_current_line);
     fprintf(f, "wrap_lines=%d\n", s->wrap_lines);
@@ -231,6 +265,15 @@ void settings_save(const VibeSettings *s) {
     fprintf(f, "prompt_font_size=%d\n", s->prompt_font_size);
     fprintf(f, "prompt_send_enter=%d\n", s->prompt_send_enter);
     fprintf(f, "prompt_switch_terminal=%d\n", s->prompt_switch_terminal);
+
+
+    fprintf(f, "ai_full_disk_access=%d\n", s->ai_full_disk_access);
+    fprintf(f, "ai_tool_read=%d\n", s->ai_tool_read);
+    fprintf(f, "ai_tool_edit=%d\n", s->ai_tool_edit);
+    fprintf(f, "ai_tool_write=%d\n", s->ai_tool_write);
+    fprintf(f, "ai_tool_glob=%d\n", s->ai_tool_glob);
+    fprintf(f, "ai_tool_grep=%d\n", s->ai_tool_grep);
+    fprintf(f, "ai_tool_bash=%d\n", s->ai_tool_bash);
 
     fprintf(f, "window_width=%d\n", s->window_width);
     fprintf(f, "window_height=%d\n", s->window_height);

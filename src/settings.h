@@ -20,6 +20,7 @@ typedef struct {
     /* Editor (file viewer) */
     char editor_font[256];
     int editor_font_size;
+    int editor_font_weight;
     gboolean show_line_numbers;
     gboolean highlight_current_line;
     gboolean wrap_lines;
@@ -33,6 +34,15 @@ typedef struct {
     int prompt_font_size;
     gboolean prompt_send_enter;
     gboolean prompt_switch_terminal;
+
+    /* AI Model */
+    gboolean ai_full_disk_access;
+    gboolean ai_tool_read;
+    gboolean ai_tool_edit;
+    gboolean ai_tool_write;
+    gboolean ai_tool_glob;
+    gboolean ai_tool_grep;
+    gboolean ai_tool_bash;
 
     /* Window */
     int window_width;
