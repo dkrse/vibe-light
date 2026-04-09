@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.5.0 (2026-04-09)
+
+### Features
+
+- **File editing with save** -- editor is now fully editable, Ctrl+S saves to disk, title shows `[modified]` indicator
+- **Undo/Redo** -- Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo (GTK4 native text buffer undo)
+- **Find in editor (Ctrl+F)** -- search bar with GtkSourceSearchContext highlighting, prev/next navigation, Enter to find next, Escape to close
+- **Go to line (Ctrl+G)** -- dialog to jump to a specific line number
+- **File browser context menu** -- right-click for Copy Path, Rename, Delete, New File, New Directory
+- **Drag & drop** -- drop files or folders from file manager onto the window to open them
+- **Markdown rendering in AI output** -- code blocks (dark background), **bold**, *italic*, `inline code`, # headings, [links](url) via GtkTextTags
+- **Toast notifications** -- AdwToast feedback for save, SFTP connect/disconnect, rename, delete, copy path, errors
+- **SFTP multiple connections** -- New button in SFTP dialog to create additional connection profiles, clear form for new entry
+- **Conversation logging** -- prompts.json now logs both input and output entries with model, session ID, token counts, and elapsed time. Input logged after response so model/session are correct.
+
+### Architecture
+
+- **Prompt log module** -- `prompt_log.c` / `prompt_log.h` extracted from window.c. Handles JSON escaping, append-only log file, input/output entry types with full metadata.
+- **AdwHeaderBar on all dialogs** -- Settings, SFTP, AI Model, Remote Dir, Go to Line, Rename, Delete dialogs now use AdwHeaderBar titlebar (follows app theme, no light panel mismatch)
+- **GtkDialog removed** -- all dialogs converted from deprecated GtkDialog to plain GtkWindow + AdwHeaderBar with custom button layouts
+
 ## v0.4.0 (2026-04-09)
 
 ### Features

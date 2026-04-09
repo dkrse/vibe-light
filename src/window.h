@@ -1,7 +1,7 @@
 #ifndef WINDOW_H
 #define WINDOW_H
 
-#include <gtk/gtk.h>
+#include <adwaita.h>
 #include <gtksourceview/gtksource.h>
 #include <vte/vte.h>
 #include "settings.h"
@@ -17,6 +17,10 @@ struct _VibeWindow {
     GtkSourceView        *file_view;
     GtkSourceBuffer      *file_buffer;
     guint                 intensity_idle_id;
+    gboolean              file_modified;
+    GtkWidget            *search_bar;
+    GtkEntry             *search_entry;
+    GtkSourceSearchContext *search_ctx;
     char                  current_dir[2048];
     char                  root_dir[2048];
 
@@ -30,6 +34,7 @@ struct _VibeWindow {
     GSubprocess          *ai_proc;           /* running claude process */
     GString              *ai_response_buf;   /* accumulates full JSON response */
     char                  ai_session_id[128]; /* session ID for --resume */
+    char                 *ai_last_prompt;     /* last sent prompt text (for deferred logging) */
 
     /* AI working directory (from terminal CWD) */
     char                  ai_cwd[2048];
@@ -90,6 +95,9 @@ struct _VibeWindow {
     char                  git_root[4096];   /* absolute git root path */
     gboolean              git_status_in_flight;
 
+    /* Toast notifications */
+    AdwToastOverlay      *toast_overlay;
+
     VibeSettings          settings;
     GtkCssProvider       *css_provider;
 };
@@ -99,5 +107,6 @@ void vibe_window_apply_settings(VibeWindow *win);
 void vibe_window_open_directory(VibeWindow *win, const char *path);
 void vibe_window_set_root_directory(VibeWindow *win, const char *path);
 void vibe_window_disconnect_sftp(VibeWindow *win);
+void vibe_window_toast(VibeWindow *win, const char *message);
 
 #endif

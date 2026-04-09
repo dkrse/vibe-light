@@ -283,6 +283,7 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
     gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
     gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(win->window));
     gtk_window_set_default_size(GTK_WINDOW(dialog), 480, 420);
+    gtk_window_set_titlebar(GTK_WINDOW(dialog), adw_header_bar_new());
 
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_widget_set_margin_start(vbox, 12);
@@ -620,6 +621,8 @@ static void on_sftp_save(GtkButton *btn, gpointer data) {
     sftp_populate_list(ctx);
 }
 
+static void sftp_clear_form(SftpCtx *ctx);
+
 static void on_sftp_delete(GtkButton *btn, gpointer data) {
     (void)btn;
     SftpCtx *ctx = data;
@@ -628,10 +631,14 @@ static void on_sftp_delete(GtkButton *btn, gpointer data) {
     for (int i = ctx->selected_idx; i < ctx->conns.count - 1; i++)
         ctx->conns.items[i] = ctx->conns.items[i + 1];
     ctx->conns.count--;
-    ctx->selected_idx = -1;
     connections_save(&ctx->conns);
     sftp_populate_list(ctx);
+    sftp_clear_form(ctx);
+}
 
+static void sftp_clear_form(SftpCtx *ctx) {
+    ctx->selected_idx = -1;
+    gtk_list_box_unselect_all(ctx->conn_list);
     gtk_editable_set_text(GTK_EDITABLE(ctx->name_entry), "");
     gtk_editable_set_text(GTK_EDITABLE(ctx->host_entry), "");
     gtk_editable_set_text(GTK_EDITABLE(ctx->port_entry), "22");
@@ -639,6 +646,14 @@ static void on_sftp_delete(GtkButton *btn, gpointer data) {
     gtk_editable_set_text(GTK_EDITABLE(ctx->path_entry), "/");
     gtk_editable_set_text(GTK_EDITABLE(ctx->password_entry), "");
     gtk_editable_set_text(GTK_EDITABLE(ctx->key_entry), "");
+    gtk_check_button_set_active(ctx->use_key_check, FALSE);
+    sftp_update_auth_visibility(ctx);
+    gtk_widget_grab_focus(GTK_WIDGET(ctx->name_entry));
+}
+
+static void on_sftp_new(GtkButton *btn, gpointer data) {
+    (void)btn;
+    sftp_clear_form(data);
 }
 
 /* ── Async SSH connect via GTask ── */
@@ -728,6 +743,10 @@ static void ssh_connect_done(GObject *src, GAsyncResult *res, gpointer data) {
     /* close dialog and open remote directory */
     gtk_window_destroy(GTK_WINDOW(ctx->dialog));
     vibe_window_set_root_directory(win, win->ssh_mount);
+
+    char toast_msg[512];
+    snprintf(toast_msg, sizeof(toast_msg), "Connected to %s@%s", d->user, d->host);
+    vibe_window_toast(win, toast_msg);
 }
 
 static void on_sftp_connect(GtkButton *btn, gpointer data) {
@@ -810,6 +829,7 @@ static void on_sftp_dialog(GSimpleAction *action, GVariant *param, gpointer data
     gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
     gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(win->window));
     gtk_window_set_default_size(GTK_WINDOW(dialog), 520, 460);
+    gtk_window_set_titlebar(GTK_WINDOW(dialog), adw_header_bar_new());
     ctx->dialog = GTK_WINDOW(dialog);
 
     g_signal_connect(dialog, "destroy", G_CALLBACK(on_sftp_dialog_destroy), ctx);
@@ -912,6 +932,10 @@ static void on_sftp_dialog(GSimpleAction *action, GVariant *param, gpointer data
     gtk_widget_set_valign(btn_box, GTK_ALIGN_END);
     gtk_widget_set_vexpand(btn_box, TRUE);
 
+    GtkWidget *new_btn = gtk_button_new_with_label("New");
+    g_signal_connect(new_btn, "clicked", G_CALLBACK(on_sftp_new), ctx);
+    gtk_box_append(GTK_BOX(btn_box), new_btn);
+
     GtkWidget *del_btn = gtk_button_new_with_label("Delete");
     gtk_widget_add_css_class(del_btn, "destructive-action");
     g_signal_connect(del_btn, "clicked", G_CALLBACK(on_sftp_delete), ctx);
@@ -993,6 +1017,7 @@ static void on_ai_model_dialog(GSimpleAction *action, GVariant *param, gpointer 
     gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
     gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(win->window));
     gtk_window_set_default_size(GTK_WINDOW(dialog), 380, -1);
+    gtk_window_set_titlebar(GTK_WINDOW(dialog), adw_header_bar_new());
     ctx->dialog = GTK_WINDOW(dialog);
 
     g_signal_connect(dialog, "destroy", G_CALLBACK(on_ai_model_destroy), ctx);

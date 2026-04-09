@@ -20,27 +20,35 @@ Vibe Light is a lightweight GTK4/libadwaita desktop application written in C17. 
 ```
 src/
   main.c         (~16 lines)     Entry point, AdwApplication setup
-  window.h       (~95 lines)     VibeWindow struct, public API
-  window.c       (~2800 lines)   Window construction, themes, file browser,
+  window.h       (~105 lines)    VibeWindow struct, public API
+  window.c       (~3500 lines)   Window construction, themes, file browser,
                                   file system monitoring (local + remote),
                                   git status integration, lazy loading,
                                   async file loading, syntax highlighting,
-                                  font intensity, AI assistant, session restore,
-                                  remote dir chooser, prompt handler,
-                                  terminal spawn
+                                  font intensity, file editing + save,
+                                  search (Ctrl+F), go to line (Ctrl+G),
+                                  undo/redo, context menu (rename/delete/new),
+                                  drag & drop, markdown rendering,
+                                  toast notifications, AI assistant,
+                                  session restore, remote dir chooser,
+                                  prompt handler, terminal spawn
   ssh.h          (~90 lines)     SSH utility declarations, poll context structs
   ssh.c          (~270 lines)    SSH transport: argv builders, ControlMaster,
                                   spawn_sync, cat_file, dir/file poll threads,
                                   inotify check thread, djb2 hash
-  settings.h     (~80 lines)     VibeSettings + SftpConnection structs
-  settings.c     (~300 lines)    Load/save config and connections, locale-safe
+  prompt_log.h   (~30 lines)     Prompt logging API declarations
+  prompt_log.c   (~170 lines)    JSON conversation log: input/output entries
+                                  with model, session, tokens, timestamps
+  settings.h     (~85 lines)     VibeSettings + SftpConnection structs
+  settings.c     (~310 lines)    Load/save config and connections, locale-safe
   actions.h      (~8 lines)      Action setup declaration
-  actions.c      (~1200 lines)   Open folder, zoom, tab switch, quit,
-                                  Settings dialog (6 tabs), SFTP dialog,
-                                  AI model dialog, async SSH connect
+  actions.c      (~1250 lines)   Open folder, zoom, tab switch, quit,
+                                  Settings dialog (6 tabs), SFTP dialog
+                                  (multi-connection), AI model dialog,
+                                  async SSH connect
 ```
 
-Total: ~4800 lines of C.
+Total: ~5500 lines of C.
 
 ## Key Data Structures
 
@@ -53,6 +61,8 @@ Central struct holding all UI state:
 - `file_list` -- GtkListBox for file browser
 - `file_view` -- GtkSourceView for file content (syntax highlighting, line numbers, current line)
 - `file_buffer` -- GtkSourceBuffer for file viewer
+- `file_modified` -- dirty flag for unsaved changes
+- `search_bar` / `search_entry` / `search_ctx` -- Ctrl+F search UI and GtkSourceSearchContext
 - `prompt_intensity_tag` -- GtkTextTag for prompt font intensity
 - `terminal` -- VteTerminal
 - `ai_output_view` / `ai_output_buffer` -- AI response display
@@ -73,6 +83,7 @@ Central struct holding all UI state:
 - `status_label` -- Status bar (recursive file/dir count or SFTP info)
 - `sftp_box`, `sftp_label`, `sftp_disconnect_btn` -- SFTP indicator in status bar
 - `cursor_label` -- Cursor position (Ln/Col)
+- `toast_overlay` -- AdwToastOverlay for non-intrusive notifications
 - `css_provider` -- Dynamic CSS for themes, fonts, and font intensity
 
 ### VibeSettings
@@ -97,14 +108,17 @@ Up to 32 saved SSH connection profiles with name, host, port, user, remote_path,
 
 ```
 GtkApplicationWindow
-  GtkBox (vertical)
-    GtkNotebook
+  AdwToastOverlay
+    GtkBox (vertical)
+      GtkNotebook
       Tab 0 "Files": GtkPaned (horizontal)
         Left: GtkBox
           GtkLabel (.path-bar) -- clickable, opens local/remote dir chooser
           GtkSeparator
           GtkScrolledWindow > GtkListBox (.file-browser)
-        Right: GtkScrolledWindow > GtkSourceView (.file-viewer)
+        Right: GtkBox (vertical)
+          GtkScrolledWindow > GtkSourceView (.file-viewer)
+          GtkBox (.search-bar) -- hidden, Ctrl+F toggles
       Tab 1 "Terminal": GtkScrolledWindow > VteTerminal
       Tab 2 "AI-model": GtkBox
           GtkBox (ai_status_bar: model label + token label)
@@ -276,13 +290,42 @@ Clicking the path label while connected opens a remote directory browser dialog.
 ## Editor (File Viewer)
 
 - GtkSourceView with syntax highlighting for 200+ languages
-- Read-only content display with blinking cursor
-- `editable=TRUE` with key handler that blocks typing but allows navigation (arrows, Home, End, PgUp/PgDn) and shortcuts (Ctrl+C, Ctrl+A, zoom)
+- **Fully editable** -- type, delete, paste; Ctrl+S saves to disk
+- **Undo/Redo** -- Ctrl+Z / Ctrl+Shift+Z (GTK4 native `gtk_text_buffer_undo`/`redo`)
+- **Modified indicator** -- window title shows `[modified]` for unsaved changes
+- **Search (Ctrl+F)** -- search bar with GtkSourceSearchContext for highlighted matches, prev/next buttons, Enter to advance, Escape to close
+- **Go to line (Ctrl+G)** -- dialog to jump to a line number with bounds checking
 - Line numbers and current line highlight handled by GtkSourceView natively
 - Async file loading via GTask -- displays "Loading..." while reading, UI never blocks
 - File click places cursor at start and focuses editor
 - Binary detection: scan first 8 KB for NUL bytes
 - File size limit: 10 MB (shows "(file too large)" for larger files)
+- Remote files are read-only (toast notification on save attempt)
+
+## File Browser Context Menu
+
+Right-click on any file or directory to access:
+- **Copy Path** -- copies absolute path to GDK clipboard
+- **Rename...** -- dialog with filename pre-filled, extension excluded from selection
+- **Delete...** -- confirmation dialog, recursive delete for directories via `delete_recursive()`
+- **New File** -- creates `untitled` (auto-numbered if exists) in the selected/current directory
+- **New Directory** -- creates `new_folder` (auto-numbered if exists)
+
+All operations show toast notifications on success/failure. Remote files are blocked with toast message.
+
+## Drag & Drop
+
+`GtkDropTarget` on the main window accepts `GDK_TYPE_FILE_LIST`:
+- Dropping a directory opens it as root (calls `vibe_window_set_root_directory`)
+- Dropping a file opens the file in the editor (sets root to parent dir if needed)
+
+## Toast Notifications
+
+`AdwToastOverlay` wraps the main layout. `vibe_toast()` (static) and `vibe_window_toast()` (public API for actions.c) show 2-second non-intrusive toasts for:
+- File save success/failure
+- SFTP connect/disconnect
+- Context menu operations (rename, delete, copy path, create)
+- Remote save attempts
 
 ## AI Assistant
 
@@ -293,7 +336,8 @@ Clicking the path label while connected opens a remote directory browser dialog.
 - Model name extracted from response JSON
 - Configurable tool access: Read, Edit, Write, Glob, Grep, Bash
 - CWD restriction: optional system prompt restricting file access to terminal's CWD
-- Prompt history saved to `.LLM/prompts.json` (append-only JSON array)
+- **Markdown rendering** via `insert_markdown()` with GtkTextTags: `md-bold`, `md-italic`, `md-code`, `md-codeblock`, `md-heading`, `md-link`
+- **Conversation logging** via `prompt_log.c` -- both input and output entries logged to `.LLM/prompts.json` with model, session, token counts, elapsed time. Input deferred until response arrives so model/session are accurate.
 
 ## Terminal
 
@@ -335,6 +379,10 @@ Supports `|` separator for alternative keys (e.g. `<Control>plus|<Control>equal`
 - Terminal tab -> VteTerminal
 - AI-model tab -> prompt text view
 
+## Dialog Theming
+
+All dialogs use `AdwHeaderBar` as titlebar (via `vibe_dialog_new()` helper or direct `gtk_window_set_titlebar(dialog, adw_header_bar_new())`). This ensures titlebars follow the active theme (dark/light) and match the main window. The deprecated `GtkDialog` is not used.
+
 ## Settings Dialog
 
 6-tab GtkNotebook dialog: GUI, File Browser, Editor, Terminal, Prompt, AI Model.
@@ -343,7 +391,7 @@ Memory management: `GPtrArray` with `g_free` tracks heap-allocated callback cont
 
 ## SFTP Connection Dialog
 
-Two-panel layout: saved connections list (left) + form (right). Supports name, host, port, user, remote path, auth type (password or private key with file browser). Connection test runs async via `GTask` -- button shows "Connecting..." and UI stays responsive.
+Two-panel layout: saved connections list (left) + form (right). Supports up to 32 named connection profiles with host, port, user, remote path, auth type (password or private key with file browser). Buttons: New (clear form), Save (create/update), Delete, Connect. Connection test runs async via `GTask` -- button shows "Connecting..." and UI stays responsive.
 
 ## Config Persistence
 

@@ -3,6 +3,7 @@
 #include "window.h"
 #include "actions.h"
 #include "ssh.h"
+#include "prompt_log.h"
 #include <string.h>
 #include <strings.h>
 #include <dirent.h>
@@ -1875,6 +1876,12 @@ static void file_load_done(GObject *src, GAsyncResult *res, gpointer data) {
     gtk_text_buffer_place_cursor(tbuf, &start);
     apply_font_intensity(win);
 
+    /* Reset modified state and update title */
+    win->file_modified = FALSE;
+    const char *base = strrchr(ctx->filepath, '/');
+    base = base ? base + 1 : ctx->filepath;
+    gtk_window_set_title(GTK_WINDOW(win->window), base);
+
     g_free(ctx->contents);
     g_free(ctx);
 }
@@ -1907,6 +1914,344 @@ static void load_file_content(VibeWindow *win, const char *filepath) {
 static void open_and_watch_file(VibeWindow *win, const char *filepath) {
     load_file_content(win, filepath);
     start_file_monitor(win, filepath);
+}
+
+static void vibe_toast(VibeWindow *win, const char *message);
+
+/* Helper: create a themed modal dialog with AdwHeaderBar */
+static GtkWidget *vibe_dialog_new(VibeWindow *win, const char *title, int width, int height) {
+    GtkWidget *dialog = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(dialog), title);
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(win->window));
+    if (width > 0 && height > 0)
+        gtk_window_set_default_size(GTK_WINDOW(dialog), width, height);
+    else if (width > 0)
+        gtk_window_set_default_size(GTK_WINDOW(dialog), width, -1);
+    GtkWidget *header = adw_header_bar_new();
+    gtk_window_set_titlebar(GTK_WINDOW(dialog), header);
+    return dialog;
+}
+
+/* ── File browser context menu ── */
+
+typedef struct {
+    VibeWindow *win;
+    char        path[4096];
+    gboolean    is_dir;
+} FileMenuCtx;
+
+static void refresh_current_dir(VibeWindow *win) {
+    if (!win->current_dir[0]) return;
+    if (win->fs_refresh_id) g_source_remove(win->fs_refresh_id);
+    win->fs_refresh_id = g_timeout_add(50, fs_refresh_cb, win);
+}
+
+static void on_ctx_new_file(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    FileMenuCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+
+    /* Determine parent directory */
+    const char *dir = ctx->is_dir ? ctx->path : win->current_dir;
+
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/untitled", dir);
+
+    /* Find unique name */
+    int n = 1;
+    while (g_file_test(path, G_FILE_TEST_EXISTS)) {
+        snprintf(path, sizeof(path), "%s/untitled_%d", dir, n++);
+    }
+
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fclose(f);
+        const char *base = strrchr(path, '/');
+        char msg[300];
+        snprintf(msg, sizeof(msg), "Created %s", base ? base + 1 : path);
+        vibe_toast(win, msg);
+        refresh_current_dir(win);
+    } else {
+        vibe_toast(win, "Failed to create file");
+    }
+    g_free(ctx);
+}
+
+static void on_ctx_new_dir(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    FileMenuCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+
+    const char *dir = ctx->is_dir ? ctx->path : win->current_dir;
+
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/new_folder", dir);
+
+    int n = 1;
+    while (g_file_test(path, G_FILE_TEST_EXISTS)) {
+        snprintf(path, sizeof(path), "%s/new_folder_%d", dir, n++);
+    }
+
+    if (g_mkdir_with_parents(path, 0755) == 0) {
+        const char *base = strrchr(path, '/');
+        char msg[300];
+        snprintf(msg, sizeof(msg), "Created %s/", base ? base + 1 : path);
+        vibe_toast(win, msg);
+        refresh_current_dir(win);
+    } else {
+        vibe_toast(win, "Failed to create directory");
+    }
+    g_free(ctx);
+}
+
+typedef struct { FileMenuCtx *fctx; GtkEntry *entry; GtkWindow *dialog; } RenameCtx;
+
+static void on_rename_go(GtkButton *btn, gpointer data) {
+    (void)btn;
+    RenameCtx *rctx = data;
+    FileMenuCtx *ctx = rctx->fctx;
+    VibeWindow *win = ctx->win;
+
+    const char *new_name = gtk_editable_get_text(GTK_EDITABLE(rctx->entry));
+    if (new_name[0] && !strchr(new_name, '/')) {
+        char *parent = g_path_get_dirname(ctx->path);
+        char new_path[4096];
+        snprintf(new_path, sizeof(new_path), "%s/%s", parent, new_name);
+        if (rename(ctx->path, new_path) == 0) {
+            char msg[300];
+            snprintf(msg, sizeof(msg), "Renamed to %s", new_name);
+            vibe_toast(win, msg);
+            refresh_current_dir(win);
+        } else {
+            vibe_toast(win, "Rename failed");
+        }
+        g_free(parent);
+    }
+    gtk_window_destroy(rctx->dialog);
+}
+
+static void on_rename_destroy(GtkWidget *w, gpointer data) {
+    (void)w;
+    RenameCtx *rctx = data;
+    g_free(rctx->fctx);
+    g_free(rctx);
+}
+
+static void on_ctx_rename(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    FileMenuCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+
+    if (path_is_remote(ctx->path)) { vibe_toast(win, "Cannot rename remote files"); g_free(ctx); return; }
+
+    const char *base = strrchr(ctx->path, '/');
+    base = base ? base + 1 : ctx->path;
+
+    GtkWidget *dialog = vibe_dialog_new(win, "Rename", 300, -1);
+
+    RenameCtx *rctx = g_new(RenameCtx, 1);
+    rctx->fctx = ctx;
+    rctx->dialog = GTK_WINDOW(dialog);
+    g_signal_connect(dialog, "destroy", G_CALLBACK(on_rename_destroy), rctx);
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(vbox, 12);
+    gtk_widget_set_margin_end(vbox, 12);
+    gtk_widget_set_margin_top(vbox, 12);
+    gtk_widget_set_margin_bottom(vbox, 12);
+
+    GtkWidget *entry = gtk_entry_new();
+    rctx->entry = GTK_ENTRY(entry);
+    gtk_editable_set_text(GTK_EDITABLE(entry), base);
+    gtk_box_append(GTK_BOX(vbox), entry);
+
+    GtkWidget *rename_btn = gtk_button_new_with_label("Rename");
+    gtk_widget_add_css_class(rename_btn, "suggested-action");
+    gtk_widget_set_halign(rename_btn, GTK_ALIGN_END);
+    g_signal_connect(rename_btn, "clicked", G_CALLBACK(on_rename_go), rctx);
+    gtk_box_append(GTK_BOX(vbox), rename_btn);
+
+    gtk_window_set_child(GTK_WINDOW(dialog), vbox);
+    gtk_window_present(GTK_WINDOW(dialog));
+    gtk_widget_grab_focus(entry);
+
+    const char *dot = strrchr(base, '.');
+    int sel_len = dot && dot != base ? (int)(dot - base) : (int)strlen(base);
+    gtk_editable_select_region(GTK_EDITABLE(entry), 0, sel_len);
+}
+
+/* Recursive delete helper */
+static gboolean delete_recursive(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return FALSE;
+
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(path);
+        if (!d) return FALSE;
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+            char child[4096];
+            snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+            delete_recursive(child);
+        }
+        closedir(d);
+        return rmdir(path) == 0;
+    } else {
+        return unlink(path) == 0;
+    }
+}
+
+typedef struct { FileMenuCtx *fctx; GtkWindow *dialog; } DeleteCtx;
+
+static void on_delete_confirm(GtkButton *btn, gpointer data) {
+    (void)btn;
+    DeleteCtx *dctx = data;
+    FileMenuCtx *ctx = dctx->fctx;
+    VibeWindow *win = ctx->win;
+
+    const char *base = strrchr(ctx->path, '/');
+    base = base ? base + 1 : ctx->path;
+    if (delete_recursive(ctx->path)) {
+        char msg[300];
+        snprintf(msg, sizeof(msg), "Deleted %s", base);
+        vibe_toast(win, msg);
+        refresh_current_dir(win);
+    } else {
+        vibe_toast(win, "Delete failed");
+    }
+    gtk_window_destroy(dctx->dialog);
+}
+
+static void on_delete_destroy(GtkWidget *w, gpointer data) {
+    (void)w;
+    DeleteCtx *dctx = data;
+    g_free(dctx->fctx);
+    g_free(dctx);
+}
+
+static void on_ctx_delete(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    FileMenuCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+
+    if (path_is_remote(ctx->path)) { vibe_toast(win, "Cannot delete remote files"); g_free(ctx); return; }
+
+    const char *base = strrchr(ctx->path, '/');
+    base = base ? base + 1 : ctx->path;
+
+    char title[300];
+    snprintf(title, sizeof(title), "Delete \"%s\"?", base);
+
+    GtkWidget *dialog = vibe_dialog_new(win, title, 350, -1);
+
+    DeleteCtx *dctx = g_new(DeleteCtx, 1);
+    dctx->fctx = ctx;
+    dctx->dialog = GTK_WINDOW(dialog);
+    g_signal_connect(dialog, "destroy", G_CALLBACK(on_delete_destroy), dctx);
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_set_margin_start(vbox, 12);
+    gtk_widget_set_margin_end(vbox, 12);
+    gtk_widget_set_margin_top(vbox, 12);
+    gtk_widget_set_margin_bottom(vbox, 12);
+
+    GtkWidget *label = gtk_label_new(ctx->is_dir ? "This directory and all contents will be permanently deleted."
+                                                  : "This file will be permanently deleted.");
+    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+    gtk_box_append(GTK_BOX(vbox), label);
+
+    GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(btn_box, GTK_ALIGN_END);
+
+    GtkWidget *cancel_btn = gtk_button_new_with_label("Cancel");
+    g_signal_connect_swapped(cancel_btn, "clicked", G_CALLBACK(gtk_window_destroy), dialog);
+    gtk_box_append(GTK_BOX(btn_box), cancel_btn);
+
+    GtkWidget *del_btn = gtk_button_new_with_label("Delete");
+    gtk_widget_add_css_class(del_btn, "destructive-action");
+    g_signal_connect(del_btn, "clicked", G_CALLBACK(on_delete_confirm), dctx);
+    gtk_box_append(GTK_BOX(btn_box), del_btn);
+
+    gtk_box_append(GTK_BOX(vbox), btn_box);
+    gtk_window_set_child(GTK_WINDOW(dialog), vbox);
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
+static void on_ctx_copy_path(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    FileMenuCtx *ctx = data;
+    GdkClipboard *clip = gdk_display_get_clipboard(gdk_display_get_default());
+    gdk_clipboard_set_text(clip, ctx->path);
+    vibe_toast(ctx->win, "Path copied");
+    g_free(ctx);
+}
+
+static void show_file_context_menu(VibeWindow *win, GtkWidget *widget,
+                                    const char *path, gboolean is_dir,
+                                    double x, double y) {
+    GMenu *menu = g_menu_new();
+    g_menu_append(menu, "Copy Path", "ctx.copy-path");
+    g_menu_append(menu, "Rename…", "ctx.rename");
+    g_menu_append(menu, "Delete…", "ctx.delete");
+
+    GMenu *new_section = g_menu_new();
+    g_menu_append(new_section, "New File", "ctx.new-file");
+    g_menu_append(new_section, "New Directory", "ctx.new-dir");
+    g_menu_append_section(menu, NULL, G_MENU_MODEL(new_section));
+    g_object_unref(new_section);
+
+    /* Each action gets its own context with the path */
+    GSimpleActionGroup *group = g_simple_action_group_new();
+
+    #define CTX_ACTION(name, cb) do { \
+        FileMenuCtx *c = g_new(FileMenuCtx, 1); \
+        c->win = win; c->is_dir = is_dir; \
+        g_strlcpy(c->path, path, sizeof(c->path)); \
+        GSimpleAction *a = g_simple_action_new(name, NULL); \
+        g_signal_connect(a, "activate", G_CALLBACK(cb), c); \
+        g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(a)); \
+        g_object_unref(a); \
+    } while(0)
+
+    CTX_ACTION("copy-path", on_ctx_copy_path);
+    CTX_ACTION("rename", on_ctx_rename);
+    CTX_ACTION("delete", on_ctx_delete);
+    CTX_ACTION("new-file", on_ctx_new_file);
+    CTX_ACTION("new-dir", on_ctx_new_dir);
+    #undef CTX_ACTION
+
+    gtk_widget_insert_action_group(widget, "ctx", G_ACTION_GROUP(group));
+
+    GtkWidget *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
+    gtk_widget_set_parent(popover, widget);
+
+    GdkRectangle rect = { (int)x, (int)y, 1, 1 };
+    gtk_popover_set_pointing_to(GTK_POPOVER(popover), &rect);
+    gtk_popover_popup(GTK_POPOVER(popover));
+
+    g_object_unref(menu);
+}
+
+static void on_file_list_right_click(GtkGestureClick *gesture, int n_press,
+                                      double x, double y, gpointer data) {
+    (void)n_press;
+    VibeWindow *win = data;
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+
+    /* Find which row was clicked */
+    GtkListBoxRow *row = gtk_list_box_get_row_at_y(win->file_list, (int)y);
+    if (!row) return;
+
+    GtkWidget *lbl = gtk_widget_get_first_child(GTK_WIDGET(row));
+    if (!lbl) return;
+
+    const char *full_path = g_object_get_data(G_OBJECT(lbl), "full-path");
+    if (!full_path) return;
+    gboolean is_dir = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(lbl), "is-dir"));
+
+    show_file_context_menu(win, GTK_WIDGET(win->file_list), full_path, is_dir, x, y);
 }
 
 static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data) {
@@ -2021,117 +2366,417 @@ static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer 
     }
 }
 
-/* ── Editor key handler (block editing, allow navigation) ── */
+/* ── Toast notifications ── */
+
+static void vibe_toast(VibeWindow *win, const char *message) {
+    if (!win->toast_overlay) return;
+    AdwToast *toast = adw_toast_new(message);
+    adw_toast_set_timeout(toast, 2);
+    adw_toast_overlay_add_toast(win->toast_overlay, toast);
+}
+
+void vibe_window_toast(VibeWindow *win, const char *message) {
+    vibe_toast(win, message);
+}
+
+/* ── Save file ── */
+
+static void save_current_file(VibeWindow *win) {
+    if (!win->current_file[0] || !win->file_modified) return;
+
+    /* Don't save remote files */
+    if (path_is_remote(win->current_file)) {
+        vibe_toast(win, "Cannot save remote files");
+        return;
+    }
+
+    GtkTextBuffer *tbuf = GTK_TEXT_BUFFER(win->file_buffer);
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(tbuf, &start, &end);
+    char *text = gtk_text_buffer_get_text(tbuf, &start, &end, FALSE);
+
+    GError *err = NULL;
+    if (g_file_set_contents(win->current_file, text, -1, &err)) {
+        win->file_modified = FALSE;
+        const char *base = strrchr(win->current_file, '/');
+        base = base ? base + 1 : win->current_file;
+        char title[256];
+        snprintf(title, sizeof(title), "%s", base);
+        gtk_window_set_title(GTK_WINDOW(win->window), title);
+
+        char msg[300];
+        snprintf(msg, sizeof(msg), "Saved %s", base);
+        vibe_toast(win, msg);
+    } else {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "Save failed: %s", err->message);
+        vibe_toast(win, msg);
+        g_error_free(err);
+    }
+    g_free(text);
+}
+
+static void on_file_modified_changed(GtkTextBuffer *buffer, gpointer data) {
+    (void)buffer;
+    VibeWindow *win = data;
+    if (!win->current_file[0]) return;
+
+    win->file_modified = TRUE;
+    const char *base = strrchr(win->current_file, '/');
+    base = base ? base + 1 : win->current_file;
+    char title[256];
+    snprintf(title, sizeof(title), "%s [modified]", base);
+    gtk_window_set_title(GTK_WINDOW(win->window), title);
+}
+
+/* ── Search callbacks ── */
+
+static void on_search_changed(GtkEditable *editable, gpointer data) {
+    VibeWindow *win = data;
+    const char *text = gtk_editable_get_text(editable);
+    GtkSourceSearchSettings *ss = gtk_source_search_context_get_settings(win->search_ctx);
+    gtk_source_search_settings_set_search_text(ss, text[0] ? text : NULL);
+}
+
+static void on_search_next(GtkButton *btn, gpointer data) {
+    (void)btn;
+    VibeWindow *win = data;
+    GtkTextBuffer *tbuf = GTK_TEXT_BUFFER(win->file_buffer);
+    GtkTextMark *mark = gtk_text_buffer_get_insert(tbuf);
+    GtkTextIter iter;
+    gtk_text_buffer_get_iter_at_mark(tbuf, &iter, mark);
+    GtkTextIter match_start, match_end;
+    gboolean has_wrap;
+    if (gtk_source_search_context_forward(win->search_ctx, &iter,
+                                           &match_start, &match_end, &has_wrap)) {
+        gtk_text_buffer_select_range(tbuf, &match_start, &match_end);
+        gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(win->file_view),
+                                      &match_start, 0.1, FALSE, 0, 0);
+    }
+}
+
+static void on_search_prev(GtkButton *btn, gpointer data) {
+    (void)btn;
+    VibeWindow *win = data;
+    GtkTextBuffer *tbuf = GTK_TEXT_BUFFER(win->file_buffer);
+    GtkTextMark *mark = gtk_text_buffer_get_insert(tbuf);
+    GtkTextIter iter;
+    gtk_text_buffer_get_iter_at_mark(tbuf, &iter, mark);
+    GtkTextIter match_start, match_end;
+    gboolean has_wrap;
+    if (gtk_source_search_context_backward(win->search_ctx, &iter,
+                                            &match_start, &match_end, &has_wrap)) {
+        gtk_text_buffer_select_range(tbuf, &match_start, &match_end);
+        gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(win->file_view),
+                                      &match_start, 0.1, FALSE, 0, 0);
+    }
+}
+
+static void on_search_close(GtkButton *btn, gpointer data) {
+    (void)btn;
+    VibeWindow *win = data;
+    gtk_widget_set_visible(win->search_bar, FALSE);
+    /* Clear search highlighting */
+    GtkSourceSearchSettings *ss = gtk_source_search_context_get_settings(win->search_ctx);
+    gtk_source_search_settings_set_search_text(ss, NULL);
+    gtk_widget_grab_focus(GTK_WIDGET(win->file_view));
+}
+
+static gboolean on_search_key(GtkEventControllerKey *ctrl, guint keyval,
+                                guint keycode, GdkModifierType state, gpointer data) {
+    (void)ctrl; (void)keycode; (void)state;
+    VibeWindow *win = data;
+    if (keyval == GDK_KEY_Escape) {
+        on_search_close(NULL, win);
+        return TRUE;
+    }
+    if (keyval == GDK_KEY_Return) {
+        on_search_next(NULL, win);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* ── Go to line dialog ── */
+
+typedef struct { VibeWindow *win; GtkEntry *entry; GtkWindow *dialog; } GotoLineCtx;
+
+static void on_goto_line_go(GtkButton *btn, gpointer data) {
+    (void)btn;
+    GotoLineCtx *ctx = data;
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(ctx->entry));
+    int line = atoi(text);
+    if (line < 1) line = 1;
+
+    GtkTextBuffer *tbuf = GTK_TEXT_BUFFER(ctx->win->file_buffer);
+    int total = gtk_text_buffer_get_line_count(tbuf);
+    if (line > total) line = total;
+
+    GtkTextIter iter;
+    gtk_text_buffer_get_iter_at_line(tbuf, &iter, line - 1);
+    gtk_text_buffer_place_cursor(tbuf, &iter);
+    GtkTextMark *mark = gtk_text_buffer_get_insert(tbuf);
+    gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(ctx->win->file_view), mark, 0.1, FALSE, 0, 0);
+
+    gtk_window_destroy(ctx->dialog);
+}
+
+static void on_goto_line_destroy(GtkWidget *w, gpointer data) { (void)w; g_free(data); }
+
+static void show_goto_line(VibeWindow *win) {
+    GtkWidget *dialog = vibe_dialog_new(win, "Go to Line", 250, -1);
+
+    GotoLineCtx *ctx = g_new(GotoLineCtx, 1);
+    ctx->win = win;
+    ctx->dialog = GTK_WINDOW(dialog);
+    g_signal_connect(dialog, "destroy", G_CALLBACK(on_goto_line_destroy), ctx);
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(vbox, 12);
+    gtk_widget_set_margin_end(vbox, 12);
+    gtk_widget_set_margin_top(vbox, 12);
+    gtk_widget_set_margin_bottom(vbox, 12);
+
+    GtkWidget *entry = gtk_entry_new();
+    ctx->entry = GTK_ENTRY(entry);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), "Line number…");
+    gtk_entry_set_input_purpose(GTK_ENTRY(entry), GTK_INPUT_PURPOSE_DIGITS);
+    gtk_box_append(GTK_BOX(vbox), entry);
+
+    GtkWidget *go_btn = gtk_button_new_with_label("Go");
+    gtk_widget_add_css_class(go_btn, "suggested-action");
+    gtk_widget_set_halign(go_btn, GTK_ALIGN_END);
+    g_signal_connect(go_btn, "clicked", G_CALLBACK(on_goto_line_go), ctx);
+    gtk_box_append(GTK_BOX(vbox), go_btn);
+
+    gtk_window_set_child(GTK_WINDOW(dialog), vbox);
+    gtk_window_present(GTK_WINDOW(dialog));
+    gtk_widget_grab_focus(entry);
+}
+
+/* ── Editor key handler ── */
 
 static gboolean on_editor_key(GtkEventControllerKey *ctrl, guint keyval,
                                guint keycode, GdkModifierType state, gpointer data) {
-    (void)ctrl; (void)keycode; (void)data;
+    (void)ctrl; (void)keycode;
+    VibeWindow *win = data;
 
-    /* allow navigation keys */
-    switch (keyval) {
-        case GDK_KEY_Left: case GDK_KEY_Right:
-        case GDK_KEY_Up: case GDK_KEY_Down:
-        case GDK_KEY_Home: case GDK_KEY_End:
-        case GDK_KEY_Page_Up: case GDK_KEY_Page_Down:
-        case GDK_KEY_Tab:
-            return FALSE; /* let through */
+    /* Ctrl+S: save */
+    if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_s) {
+        save_current_file(win);
+        return TRUE;
     }
 
-    /* allow Ctrl+C (copy), Ctrl+A (select all) */
-    if (state & GDK_CONTROL_MASK) {
-        if (keyval == GDK_KEY_c || keyval == GDK_KEY_a ||
-            keyval == GDK_KEY_plus || keyval == GDK_KEY_equal ||
-            keyval == GDK_KEY_minus || keyval == GDK_KEY_o ||
-            keyval == GDK_KEY_q)
-            return FALSE;
+    /* Ctrl+F: toggle search bar */
+    if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_f) {
+        gboolean visible = gtk_widget_get_visible(win->search_bar);
+        gtk_widget_set_visible(win->search_bar, !visible);
+        if (!visible)
+            gtk_widget_grab_focus(GTK_WIDGET(win->search_entry));
+        return TRUE;
     }
 
-    /* block everything else (typing, delete, backspace, enter) */
-    return TRUE;
+    /* Ctrl+G: go to line */
+    if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_g) {
+        show_goto_line(win);
+        return TRUE;
+    }
+
+    /* Ctrl+Z: undo */
+    if ((state & GDK_CONTROL_MASK) && !(state & GDK_SHIFT_MASK) && keyval == GDK_KEY_z) {
+        GtkTextBuffer *tbuf = GTK_TEXT_BUFFER(win->file_buffer);
+        if (gtk_text_buffer_get_can_undo(tbuf))
+            gtk_text_buffer_undo(tbuf);
+        return TRUE;
+    }
+
+    /* Ctrl+Shift+Z or Ctrl+Y: redo */
+    if (((state & GDK_CONTROL_MASK) && (state & GDK_SHIFT_MASK) && keyval == GDK_KEY_z) ||
+        ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_y)) {
+        GtkTextBuffer *tbuf = GTK_TEXT_BUFFER(win->file_buffer);
+        if (gtk_text_buffer_get_can_redo(tbuf))
+            gtk_text_buffer_redo(tbuf);
+        return TRUE;
+    }
+
+    /* Everything else: allow (editor is now fully editable) */
+    return FALSE;
 }
 
 /* ── Prompt key handler ── */
 
-/* Escape string for JSON. Caller must g_free. */
-static char *json_escape(const char *s) {
-    if (!s) return g_strdup("");
-    GString *out = g_string_new(NULL);
-    for (const char *p = s; *p; p++) {
-        switch (*p) {
-            case '"':  g_string_append(out, "\\\""); break;
-            case '\\': g_string_append(out, "\\\\"); break;
-            case '\n': g_string_append(out, "\\n");  break;
-            case '\r': g_string_append(out, "\\r");  break;
-            case '\t': g_string_append(out, "\\t");  break;
-            default:
-                if ((unsigned char)*p < 0x20)
-                    g_string_append_printf(out, "\\u%04x", (unsigned)*p);
-                else
-                    g_string_append_c(out, *p);
-        }
-    }
-    return g_string_free(out, FALSE);
-}
-
-/* Append a prompt entry to .LLM/prompts.json */
-static void log_prompt_json(VibeWindow *win, const char *prompt) {
-    if (!win->root_dir[0]) return;
-
-    char llmdir[2200];
-    snprintf(llmdir, sizeof(llmdir), "%s/.LLM", win->root_dir);
-    g_mkdir_with_parents(llmdir, 0755);
-
-    char jpath[2200];
-    snprintf(jpath, sizeof(jpath), "%s/.LLM/prompts.json", win->root_dir);
-
-    /* Read existing file to find next id and insert before closing ] */
-    char *existing = NULL;
-    gsize len = 0;
-    gboolean have_file = g_file_get_contents(jpath, &existing, &len, NULL);
-
-    int next_id = 0;
-    if (have_file && existing) {
-        const char *p = existing;
-        while ((p = strstr(p, "\"id\":")) != NULL) {
-            p += 5;
-            while (*p == ' ') p++;
-            int v = atoi(p);
-            if (v >= next_id) next_id = v + 1;
-        }
-    }
-
-    /* Timestamp */
-    GDateTime *now = g_date_time_new_now_local();
-    char *ts = g_date_time_format(now, "%Y-%m-%d %H:%M:%S");
-    g_date_time_unref(now);
-
-    char *ep = json_escape(prompt);
-
-    FILE *f = fopen(jpath, "w");
-    if (!f) { g_free(ep); g_free(ts); g_free(existing); return; }
-
-    if (have_file && len > 2) {
-        char *last = strrchr(existing, ']');
-        if (last) {
-            fwrite(existing, 1, (size_t)(last - existing), f);
-            fprintf(f, ",\n  {\"id\": %d, \"timestamp\": \"%s\", \"prompt\": \"%s\"}\n]\n",
-                    next_id, ts, ep);
-        } else {
-            fprintf(f, "[\n  {\"id\": %d, \"timestamp\": \"%s\", \"prompt\": \"%s\"}\n]\n",
-                    next_id, ts, ep);
-        }
-    } else {
-        fprintf(f, "[\n  {\"id\": %d, \"timestamp\": \"%s\", \"prompt\": \"%s\"}\n]\n",
-                next_id, ts, ep);
-    }
-
-    fclose(f);
-    g_free(ep);
-    g_free(ts);
-    g_free(existing);
-}
-
 /* Parse JSON response from claude --output-format json */
+/* ── Markdown rendering for AI output ── */
+
+static void ensure_md_tags(GtkTextBuffer *buf) {
+    /* Create tags only once */
+    if (gtk_text_tag_table_lookup(gtk_text_buffer_get_tag_table(buf), "md-bold"))
+        return;
+
+    gtk_text_buffer_create_tag(buf, "md-bold", "weight", PANGO_WEIGHT_BOLD, NULL);
+    gtk_text_buffer_create_tag(buf, "md-italic", "style", PANGO_STYLE_ITALIC, NULL);
+    gtk_text_buffer_create_tag(buf, "md-code",
+        "family", "Monospace",
+        "background", "#2d2d2d",
+        "foreground", "#e6e6e6",
+        NULL);
+    gtk_text_buffer_create_tag(buf, "md-codeblock",
+        "family", "Monospace",
+        "background", "#1e1e1e",
+        "foreground", "#d4d4d4",
+        "paragraph-background", "#1e1e1e",
+        "left-margin", 16,
+        "right-margin", 16,
+        "pixels-above-lines", 4,
+        "pixels-below-lines", 4,
+        NULL);
+    gtk_text_buffer_create_tag(buf, "md-heading",
+        "weight", PANGO_WEIGHT_BOLD,
+        "scale", 1.2,
+        "pixels-above-lines", 8,
+        "pixels-below-lines", 4,
+        NULL);
+    gtk_text_buffer_create_tag(buf, "md-link",
+        "foreground", "#5b9bd5",
+        "underline", PANGO_UNDERLINE_SINGLE,
+        NULL);
+}
+
+/* Insert markdown-formatted text into buffer at the given position */
+static void insert_markdown(GtkTextBuffer *buf, GtkTextIter *pos, const char *text) {
+    ensure_md_tags(buf);
+
+    const char *p = text;
+    gboolean in_codeblock = FALSE;
+
+    while (*p) {
+        /* Code block: ```...``` */
+        if (!in_codeblock && strncmp(p, "```", 3) == 0) {
+            /* Skip opening ``` and optional language name */
+            p += 3;
+            while (*p && *p != '\n') p++;
+            if (*p == '\n') p++;
+            in_codeblock = TRUE;
+
+            /* Find closing ``` */
+            const char *block_end = strstr(p, "\n```");
+            if (!block_end) block_end = p + strlen(p);
+
+            /* Insert the code block content with tag */
+            int mark_offset = gtk_text_iter_get_offset(pos);
+            gtk_text_buffer_insert(buf, pos, p, (int)(block_end - p));
+            gtk_text_buffer_insert(buf, pos, "\n", 1);
+            GtkTextIter tag_start;
+            gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
+            gtk_text_buffer_apply_tag_by_name(buf, "md-codeblock", &tag_start, pos);
+
+            p = block_end;
+            if (*p == '\n') p++;
+            if (strncmp(p, "```", 3) == 0) {
+                p += 3;
+                if (*p == '\n') p++;
+            }
+            in_codeblock = FALSE;
+            continue;
+        }
+
+        /* Process line by line */
+        const char *line_end = strchr(p, '\n');
+        if (!line_end) line_end = p + strlen(p);
+        int line_len = (int)(line_end - p);
+
+        /* Heading: # ... */
+        if (line_len > 2 && p[0] == '#' && p[1] == ' ') {
+            const char *h = p + 2;
+            int hlen = line_len - 2;
+            int mark_offset = gtk_text_iter_get_offset(pos);
+            gtk_text_buffer_insert(buf, pos, h, hlen);
+            gtk_text_buffer_insert(buf, pos, "\n", 1);
+            GtkTextIter tag_start;
+            gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
+            gtk_text_buffer_apply_tag_by_name(buf, "md-heading", &tag_start, pos);
+            p = line_end;
+            if (*p == '\n') p++;
+            continue;
+        }
+
+        /* Process inline formatting within the line */
+        const char *lp = p;
+        while (lp < p + line_len) {
+            /* Bold: **text** */
+            if (lp + 1 < p + line_len && lp[0] == '*' && lp[1] == '*') {
+                const char *end = strstr(lp + 2, "**");
+                if (end && end < p + line_len) {
+                    int mark_offset = gtk_text_iter_get_offset(pos);
+                    gtk_text_buffer_insert(buf, pos, lp + 2, (int)(end - lp - 2));
+                    GtkTextIter tag_start;
+                    gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
+                    gtk_text_buffer_apply_tag_by_name(buf, "md-bold", &tag_start, pos);
+                    lp = end + 2;
+                    continue;
+                }
+            }
+
+            /* Inline code: `text` */
+            if (lp[0] == '`') {
+                const char *end = strchr(lp + 1, '`');
+                if (end && end < p + line_len) {
+                    int mark_offset = gtk_text_iter_get_offset(pos);
+                    gtk_text_buffer_insert(buf, pos, lp + 1, (int)(end - lp - 1));
+                    GtkTextIter tag_start;
+                    gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
+                    gtk_text_buffer_apply_tag_by_name(buf, "md-code", &tag_start, pos);
+                    lp = end + 1;
+                    continue;
+                }
+            }
+
+            /* Link: [text](url) */
+            if (lp[0] == '[') {
+                const char *bracket_end = strchr(lp + 1, ']');
+                if (bracket_end && bracket_end + 1 < p + line_len && bracket_end[1] == '(') {
+                    const char *paren_end = strchr(bracket_end + 2, ')');
+                    if (paren_end && paren_end <= p + line_len) {
+                        int mark_offset = gtk_text_iter_get_offset(pos);
+                        gtk_text_buffer_insert(buf, pos, lp + 1, (int)(bracket_end - lp - 1));
+                        GtkTextIter tag_start;
+                        gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
+                        gtk_text_buffer_apply_tag_by_name(buf, "md-link", &tag_start, pos);
+                        lp = paren_end + 1;
+                        continue;
+                    }
+                }
+            }
+
+            /* Italic: *text* (single asterisk, not bold) */
+            if (lp[0] == '*' && (lp + 1 >= p + line_len || lp[1] != '*')) {
+                const char *end = strchr(lp + 1, '*');
+                if (end && end < p + line_len && (end + 1 >= p + line_len || end[1] != '*')) {
+                    int mark_offset = gtk_text_iter_get_offset(pos);
+                    gtk_text_buffer_insert(buf, pos, lp + 1, (int)(end - lp - 1));
+                    GtkTextIter tag_start;
+                    gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
+                    gtk_text_buffer_apply_tag_by_name(buf, "md-italic", &tag_start, pos);
+                    lp = end + 1;
+                    continue;
+                }
+            }
+
+            /* Regular character */
+            gtk_text_buffer_insert(buf, pos, lp, 1);
+            lp++;
+        }
+
+        /* End of line */
+        if (*line_end == '\n') {
+            gtk_text_buffer_insert(buf, pos, "\n", 1);
+            p = line_end + 1;
+        } else {
+            p = line_end;
+        }
+    }
+}
+
 static void ai_parse_and_display(VibeWindow *win) {
     const char *json = win->ai_response_buf->str;
 
@@ -2161,12 +2806,15 @@ static void ai_parse_and_display(VibeWindow *win) {
         g_string_append(result_text, json);
     }
 
-    /* Display result in output view */
+    /* Display result in output view with markdown formatting */
     GtkTextIter end;
     gtk_text_buffer_get_end_iter(win->ai_output_buffer, &end);
-    gtk_text_buffer_insert(win->ai_output_buffer, &end, result_text->str, result_text->len);
+    insert_markdown(win->ai_output_buffer, &end, result_text->str);
+    gtk_text_buffer_get_end_iter(win->ai_output_buffer, &end);
     gtk_text_buffer_insert(win->ai_output_buffer, &end, "\n\n", 2);
-    g_string_free(result_text, TRUE);
+
+    /* Keep result text for logging — freed after log */
+    char *result_for_log = g_string_free(result_text, FALSE);
 
     /* Scroll to bottom */
     gtk_text_buffer_get_end_iter(win->ai_output_buffer, &end);
@@ -2245,6 +2893,24 @@ static void ai_parse_and_display(VibeWindow *win) {
                  time_s, in_s, out_s, tot_s);
         gtk_label_set_text(win->ai_token_label, tok_str);
     }
+
+    /* Log prompt (input) + response (output) to JSON — both with correct model/session */
+    const char *log_session = win->ai_session_id[0] ? win->ai_session_id : NULL;
+    if (win->ai_last_prompt) {
+        prompt_log_input(win->root_dir, log_session, model, win->ai_last_prompt);
+        g_free(win->ai_last_prompt);
+        win->ai_last_prompt = NULL;
+    }
+
+    int req_in = 0, req_out = 0;
+    const char *it2 = strstr(json, "\"inputTokens\":");
+    const char *ot2 = strstr(json, "\"outputTokens\":");
+    if (it2) req_in = atoi(it2 + 14);
+    if (ot2) req_out = atoi(ot2 + 15);
+    prompt_log_output(win->root_dir, log_session, model,
+                      result_for_log, req_in, req_out,
+                      win->ai_last_elapsed);
+    g_free(result_for_log);
 }
 
 /* Called when claude process finishes and all stdout is available */
@@ -2287,8 +2953,9 @@ static void send_prompt_to_ai(VibeWindow *win) {
         return;
     }
 
-    /* Log prompt to JSON */
-    log_prompt_json(win, text);
+    /* Store prompt for deferred logging (logged after response with correct model/session) */
+    g_free(win->ai_last_prompt);
+    win->ai_last_prompt = g_strdup(text);
 
     /* Show prompt in output view */
     GtkTextIter out_end;
@@ -2503,6 +3170,7 @@ void vibe_window_disconnect_sftp(VibeWindow *win) {
     /* go back to home directory */
     const char *home = g_get_home_dir();
     vibe_window_set_root_directory(win, home);
+    vibe_toast(win, "SFTP disconnected");
 }
 
 static void on_sftp_disconnect_clicked(GtkButton *btn, gpointer data) {
@@ -2581,6 +3249,7 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
     g_cancellable_cancel(win->cancellable);
 
     /* Clean up AI process */
+    g_free(win->ai_last_prompt);
     if (win->ai_response_buf) { g_string_free(win->ai_response_buf, TRUE); win->ai_response_buf = NULL; }
     if (win->ai_proc) {
         g_subprocess_force_exit(win->ai_proc);
@@ -2762,11 +3431,7 @@ static void show_remote_dir_chooser(VibeWindow *win) {
     strncpy(ctx->current_remote, win->ssh_remote_path, sizeof(ctx->current_remote) - 1);
     if (!ctx->current_remote[0]) strcpy(ctx->current_remote, "/");
 
-    GtkWidget *dialog = gtk_window_new();
-    gtk_window_set_title(GTK_WINDOW(dialog), "Remote Directory");
-    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
-    gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(win->window));
-    gtk_window_set_default_size(GTK_WINDOW(dialog), 420, 400);
+    GtkWidget *dialog = vibe_dialog_new(win, "Remote Directory", 420, 400);
     ctx->dialog = GTK_WINDOW(dialog);
     g_signal_connect(dialog, "destroy", G_CALLBACK(on_remote_dir_destroy), ctx);
 
@@ -2848,6 +3513,41 @@ static GtkWidget *build_menu_button(void) {
     return btn;
 }
 
+/* ── Drag & drop ── */
+
+static gboolean on_drop(GtkDropTarget *target, const GValue *value,
+                          double x, double y, gpointer data) {
+    (void)target; (void)x; (void)y;
+    VibeWindow *win = data;
+
+    if (!G_VALUE_HOLDS(value, GDK_TYPE_FILE_LIST)) return FALSE;
+
+    GSList *files = g_value_get_boxed(value);
+    if (!files) return FALSE;
+
+    /* Use the first dropped file/directory */
+    GFile *file = files->data;
+    char *path = g_file_get_path(file);
+    if (!path) return FALSE;
+
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) {
+            vibe_window_set_root_directory(win, path);
+        } else if (S_ISREG(st.st_mode)) {
+            /* Open the file's parent directory, then open the file */
+            char *dir = g_path_get_dirname(path);
+            if (!win->root_dir[0] || strncmp(path, win->root_dir, strlen(win->root_dir)) != 0)
+                vibe_window_set_root_directory(win, dir);
+            open_and_watch_file(win, path);
+            gtk_widget_grab_focus(GTK_WIDGET(win->file_view));
+            g_free(dir);
+        }
+    }
+    g_free(path);
+    return TRUE;
+}
+
 VibeWindow *vibe_window_new(GtkApplication *app) {
     VibeWindow *win = g_new0(VibeWindow, 1);
     win->cancellable = g_cancellable_new();
@@ -2898,6 +3598,12 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     gtk_widget_add_css_class(GTK_WIDGET(win->file_list), "file-browser");
     gtk_list_box_set_selection_mode(win->file_list, GTK_SELECTION_SINGLE);
     g_signal_connect(win->file_list, "row-activated", G_CALLBACK(on_file_row_activated), win);
+
+    /* Right-click context menu */
+    GtkGesture *right_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right_click), 3); /* button 3 = right */
+    g_signal_connect(right_click, "pressed", G_CALLBACK(on_file_list_right_click), win);
+    gtk_widget_add_controller(GTK_WIDGET(win->file_list), GTK_EVENT_CONTROLLER(right_click));
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), GTK_WIDGET(win->file_list));
     gtk_box_append(GTK_BOX(browser_box), scroll);
 
@@ -2932,8 +3638,9 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
         gtk_source_buffer_set_style_scheme(win->file_buffer, scheme);
 
     g_signal_connect(win->file_buffer, "changed", G_CALLBACK(on_file_buffer_changed), win);
+    g_signal_connect(win->file_buffer, "changed", G_CALLBACK(on_file_modified_changed), win);
 
-    /* block keyboard editing but allow cursor movement and blinking */
+    /* Key handler for Ctrl+S, Ctrl+F — editing is allowed */
     GtkEventController *edit_key = gtk_event_controller_key_new();
     gtk_event_controller_set_propagation_phase(edit_key, GTK_PHASE_CAPTURE);
     g_signal_connect(edit_key, "key-pressed", G_CALLBACK(on_editor_key), win);
@@ -2946,7 +3653,52 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     gtk_widget_set_vexpand(viewer_scroll, TRUE);
     gtk_widget_set_hexpand(viewer_scroll, TRUE);
 
-    gtk_paned_set_end_child(GTK_PANED(paned), viewer_scroll);
+    /* Search bar (hidden by default, shown with Ctrl+F) */
+    win->search_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_visible(win->search_bar, FALSE);
+    gtk_widget_set_margin_start(win->search_bar, 8);
+    gtk_widget_set_margin_end(win->search_bar, 8);
+    gtk_widget_set_margin_top(win->search_bar, 4);
+    gtk_widget_set_margin_bottom(win->search_bar, 4);
+
+    win->search_entry = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_placeholder_text(win->search_entry, "Search…");
+    gtk_widget_set_hexpand(GTK_WIDGET(win->search_entry), TRUE);
+    gtk_box_append(GTK_BOX(win->search_bar), GTK_WIDGET(win->search_entry));
+
+    GtkWidget *prev_btn = gtk_button_new_from_icon_name("go-up-symbolic");
+    GtkWidget *next_btn = gtk_button_new_from_icon_name("go-down-symbolic");
+    gtk_widget_add_css_class(prev_btn, "flat");
+    gtk_widget_add_css_class(next_btn, "flat");
+    gtk_box_append(GTK_BOX(win->search_bar), prev_btn);
+    gtk_box_append(GTK_BOX(win->search_bar), next_btn);
+
+    GtkWidget *close_btn = gtk_button_new_from_icon_name("window-close-symbolic");
+    gtk_widget_add_css_class(close_btn, "flat");
+    gtk_box_append(GTK_BOX(win->search_bar), close_btn);
+
+    /* Search signals */
+    g_signal_connect(win->search_entry, "changed", G_CALLBACK(on_search_changed), win);
+    g_signal_connect(prev_btn, "clicked", G_CALLBACK(on_search_prev), win);
+    g_signal_connect(next_btn, "clicked", G_CALLBACK(on_search_next), win);
+    g_signal_connect(close_btn, "clicked", G_CALLBACK(on_search_close), win);
+    GtkEventController *search_key = gtk_event_controller_key_new();
+    g_signal_connect(search_key, "key-pressed", G_CALLBACK(on_search_key), win);
+    gtk_widget_add_controller(GTK_WIDGET(win->search_entry), search_key);
+
+    /* GtkSourceView search context */
+    GtkSourceSearchSettings *search_settings = gtk_source_search_settings_new();
+    gtk_source_search_settings_set_wrap_around(search_settings, TRUE);
+    win->search_ctx = gtk_source_search_context_new(win->file_buffer, search_settings);
+    gtk_source_search_context_set_highlight(win->search_ctx, TRUE);
+    g_object_unref(search_settings);
+
+    /* VBox: viewer + search bar */
+    GtkWidget *viewer_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(viewer_vbox), viewer_scroll);
+    gtk_box_append(GTK_BOX(viewer_vbox), win->search_bar);
+
+    gtk_paned_set_end_child(GTK_PANED(paned), viewer_vbox);
     gtk_paned_set_shrink_end_child(GTK_PANED(paned), FALSE);
 
     gtk_notebook_append_page(win->notebook, paned, gtk_label_new("Files"));
@@ -3073,12 +3825,15 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     gtk_widget_add_css_class(GTK_WIDGET(win->cursor_label), "dim-label");
     gtk_box_append(GTK_BOX(status_bar), GTK_WIDGET(win->cursor_label));
 
-    /* Main layout: notebook + status bar */
+    /* Main layout: toast overlay > notebook + status bar */
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_append(GTK_BOX(main_box), GTK_WIDGET(win->notebook));
     gtk_widget_set_vexpand(GTK_WIDGET(win->notebook), TRUE);
     gtk_box_append(GTK_BOX(main_box), status_bar);
-    gtk_window_set_child(GTK_WINDOW(win->window), main_box);
+
+    win->toast_overlay = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
+    adw_toast_overlay_set_child(win->toast_overlay, main_box);
+    gtk_window_set_child(GTK_WINDOW(win->window), GTK_WIDGET(win->toast_overlay));
 
     /* Tab switch → focus */
     g_signal_connect(win->notebook, "switch-page", G_CALLBACK(on_tab_switched), win);
@@ -3092,6 +3847,11 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
 
     g_signal_connect(win->window, "close-request", G_CALLBACK(on_close_request), win);
     g_signal_connect(win->window, "destroy", G_CALLBACK(on_destroy), win);
+
+    /* Drag & drop: accept file drops on the whole window */
+    GtkDropTarget *drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
+    g_signal_connect(drop, "drop", G_CALLBACK(on_drop), win);
+    gtk_widget_add_controller(GTK_WIDGET(win->window), GTK_EVENT_CONTROLLER(drop));
 
     actions_setup(win, app);
     vibe_window_apply_settings(win);
