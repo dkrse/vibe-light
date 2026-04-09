@@ -73,6 +73,7 @@ void settings_load(VibeSettings *s) {
     s->ai_tool_glob = TRUE;
     s->ai_tool_grep = TRUE;
     s->ai_tool_bash = TRUE;
+    s->ai_markdown = TRUE;
 
     s->window_width = 900;
     s->window_height = 600;
@@ -139,6 +140,7 @@ void settings_load(VibeSettings *s) {
         else if (strcmp(key, "ai_tool_glob") == 0) s->ai_tool_glob = atoi(val);
         else if (strcmp(key, "ai_tool_grep") == 0) s->ai_tool_grep = atoi(val);
         else if (strcmp(key, "ai_tool_bash") == 0) s->ai_tool_bash = atoi(val);
+        else if (strcmp(key, "ai_markdown") == 0) s->ai_markdown = atoi(val);
 
         else if (strcmp(key, "window_width") == 0) s->window_width = atoi(val);
         else if (strcmp(key, "window_height") == 0) s->window_height = atoi(val);
@@ -310,6 +312,7 @@ void settings_save(const VibeSettings *s) {
     fprintf(f, "ai_tool_glob=%d\n", s->ai_tool_glob);
     fprintf(f, "ai_tool_grep=%d\n", s->ai_tool_grep);
     fprintf(f, "ai_tool_bash=%d\n", s->ai_tool_bash);
+    fprintf(f, "ai_markdown=%d\n", s->ai_markdown);
 
     fprintf(f, "window_width=%d\n", s->window_width);
     fprintf(f, "window_height=%d\n", s->window_height);

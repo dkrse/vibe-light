@@ -4,6 +4,9 @@
 #include "actions.h"
 #include "ssh.h"
 #include "prompt_log.h"
+#include <cmark-gfm.h>
+#include <cmark-gfm-core-extensions.h>
+#include <webkit/webkit.h>
 #include <string.h>
 #include <strings.h>
 #include <dirent.h>
@@ -41,53 +44,55 @@ static const ThemeDef custom_themes[] = {
 static void build_theme_css(char *buf, size_t bufsize, const char *fg, const char *bg) {
     snprintf(buf, bufsize,
         /* base */
-        "window,window.background{background-color:%s;color:%s}"
-        "box{background-color:%s;color:%s}"
-        "scrolledwindow{background-color:%s}"
-        /* textview — exclude .file-viewer from color to preserve syntax highlighting */
-        "textview{background-color:%s}"
-        "textview:not(.file-viewer) text{background-color:%s;color:%s}"
-        ".file-viewer text{background-color:%s}"
+        "window,window.background{background-color:%s;color:%s;}"
+        "box{background-color:%s;color:%s;}"
+        "scrolledwindow{background-color:%s;}"
+        /* textview — exclude .file-viewer and .ai-output from color */
+        "textview{background-color:%s;}"
+        "textview:not(.file-viewer):not(.ai-output) text{background-color:%s;color:%s;}"
+        ".file-viewer text{background-color:%s;}"
+        ".ai-output text{background-color:%s;}"
         /* headerbar */
-        ".titlebar,headerbar{background:%s;color:%s;box-shadow:none}"
+        ".titlebar,headerbar{background:%s;color:%s;box-shadow:none;}"
         "headerbar button,headerbar menubutton button,headerbar menubutton"
-        "{color:%s;background:transparent}"
+        "{color:%s;background:transparent;}"
         "headerbar button:hover,headerbar menubutton button:hover"
-        "{background:alpha(%s,0.1)}"
+        "{background:alpha(%s,0.1);}"
         /* notebook tabs */
-        "notebook header{background-color:%s;border-color:alpha(%s,0.2)}"
-        "notebook header tab{color:alpha(%s,0.6);background-color:transparent}"
-        "notebook header tab:checked{color:%s;background-color:alpha(%s,0.1)}"
-        "notebook header tab:hover{background-color:alpha(%s,0.06)}"
-        "notebook stack{background-color:%s}"
+        "notebook header{background-color:%s;border-color:alpha(%s,0.2);}"
+        "notebook header tab{color:alpha(%s,0.6);background-color:transparent;}"
+        "notebook header tab:checked{color:%s;background-color:alpha(%s,0.1);}"
+        "notebook header tab:hover{background-color:alpha(%s,0.06);}"
+        "notebook stack{background-color:%s;}"
         /* labels */
-        "label{color:%s}"
-        ".dim-label{color:alpha(%s,0.5)}"
-        ".path-bar{background-color:%s;color:%s}"
+        "label{color:%s;}"
+        ".dim-label{color:alpha(%s,0.5);}"
+        ".path-bar{background-color:%s;color:%s;}"
         /* listbox */
-        "listbox,list{background-color:%s;color:%s}"
-        "row{background-color:%s;color:%s}"
-        "row:hover{background-color:alpha(%s,0.08)}"
-        "row:selected{background-color:alpha(%s,0.15)}"
+        "listbox,list{background-color:%s;color:%s;}"
+        "row{background-color:%s;color:%s;}"
+        "row:hover{background-color:alpha(%s,0.08);}"
+        "row:selected{background-color:alpha(%s,0.15);}"
         /* separator, paned */
-        "separator{background-color:alpha(%s,0.2)}"
-        "paned>separator{background-color:alpha(%s,0.2)}"
+        "separator{background-color:alpha(%s,0.2);}"
+        "paned>separator{background-color:alpha(%s,0.2);}"
         /* scrollbar */
-        "scrollbar{background-color:transparent}"
+        "scrollbar{background-color:transparent;}"
         /* popover */
-        "popover,popover.menu{background:transparent;box-shadow:none;border:none}"
+        "popover,popover.menu{background:transparent;box-shadow:none;border:none;}"
         "popover>contents,popover.menu>contents{background-color:%s;color:%s;"
-        "  border-radius:12px;border:none;box-shadow:0 2px 8px rgba(0,0,0,0.3)}"
-        "popover modelbutton{color:%s}"
-        "popover modelbutton:hover{background-color:alpha(%s,0.15)}"
+        "  border-radius:12px;border:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);}"
+        "popover modelbutton{color:%s;}"
+        "popover modelbutton:hover{background-color:alpha(%s,0.15);}"
         /* window controls */
-        "windowcontrols button{color:%s}",
+        "windowcontrols button{color:%s;}",
         bg, fg,      /* window */
         bg, fg,      /* box */
         bg,          /* scrolledwindow */
         bg,          /* textview */
-        bg, fg,      /* textview:not(.file-viewer) text */
+        bg, fg,      /* textview:not(.file-viewer):not(.ai-output) text */
         bg,          /* .file-viewer text bg */
+        bg,          /* .ai-output text bg */
         bg, fg,      /* headerbar */
         fg,          /* headerbar buttons */
         fg,          /* headerbar hover */
@@ -254,8 +259,13 @@ static void on_prompt_buffer_changed(GtkTextBuffer *buffer, gpointer data) {
 
 /* ── Apply all settings ── */
 
+static void ai_refresh_output(VibeWindow *win);
+
 void vibe_window_apply_settings(VibeWindow *win) {
     apply_theme(win);
+
+    /* Re-render AI webview with updated theme colors */
+    ai_refresh_output(win);
 
     /* terminal font */
     PangoFontDescription *fd = pango_font_description_new();
@@ -279,6 +289,9 @@ void vibe_window_apply_settings(VibeWindow *win) {
     /* GtkSourceView: line numbers + current line highlight + style scheme */
     gtk_source_view_set_show_line_numbers(win->file_view, win->settings.show_line_numbers);
     gtk_source_view_set_highlight_current_line(win->file_view, win->settings.highlight_current_line);
+
+    /* Editor font intensity via widget opacity */
+    gtk_widget_set_opacity(GTK_WIDGET(win->file_view), win->settings.font_intensity);
 
     /* Update source style scheme to match theme */
     GtkSourceStyleSchemeManager *ssm = gtk_source_style_scheme_manager_get_default();
@@ -329,42 +342,37 @@ void vibe_window_apply_settings(VibeWindow *win) {
     int b = (int)(fg_rgba.blue * 255);
     int a_full = (int)(alpha * 100);
     int a_dim = (int)(alpha * 30);
-    char fg_full[64], fg_dim[64], opacity_str[16];
+    char fg_full[64], fg_dim[64];
     /* use integer math to avoid locale comma in decimals */
     snprintf(fg_full, sizeof(fg_full), "rgba(%d,%d,%d,0.%02d)", r, g, b, a_full);
     snprintf(fg_dim, sizeof(fg_dim), "rgba(%d,%d,%d,0.%02d)", r, g, b, a_dim);
-    /* opacity for file viewer text (locale-safe) */
-    if (alpha >= 0.99)
-        snprintf(opacity_str, sizeof(opacity_str), "1");
-    else
-        snprintf(opacity_str, sizeof(opacity_str), "0.%02d", a_full);
 
     char font_css[8192];
     snprintf(font_css, sizeof(font_css),
              /* GUI font — headerbar, tabs, labels, menus, dialogs, status bar */
-             "window,headerbar,.titlebar{font-family:%s;font-size:%dpt}"
+             "window,headerbar,.titlebar{font-family:%s;font-size:%dpt;}"
              "headerbar button,headerbar menubutton button,headerbar menubutton"
-             "{font-family:%s;font-size:%dpt}"
-             "notebook header tab{font-family:%s;font-size:%dpt}"
-             "popover modelbutton{font-family:%s;font-size:%dpt}"
-             "popover>contents,popover.menu>contents{font-family:%s;font-size:%dpt}"
-             ".path-bar{font-family:%s;font-size:%dpt}"
-             ".statusbar label{font-family:%s;font-size:%dpt}"
+             "{font-family:%s;font-size:%dpt;}"
+             "notebook header tab{font-family:%s;font-size:%dpt;}"
+             "popover modelbutton{font-family:%s;font-size:%dpt;}"
+             "popover>contents,popover.menu>contents{font-family:%s;font-size:%dpt;}"
+             ".path-bar{font-family:%s;font-size:%dpt;}"
+             ".statusbar label{font-family:%s;font-size:%dpt;}"
              /* per-section fonts */
-             ".file-viewer{font-family:%s;font-size:%dpt;font-weight:%d;caret-color:%s;opacity:%s}"
-             ".file-browser{font-family:%s;font-size:%dpt}"
-             ".file-browser label{color:%s}"
-             ".prompt-view{font-family:%s;font-size:%dpt;caret-color:%s}"
+             ".file-viewer{font-family:%s;font-size:%dpt;font-weight:%d;caret-color:%s;}"
+             ".file-browser{font-family:%s;font-size:%dpt;}"
+             ".file-browser label{color:%s;}"
+             ".prompt-view{font-family:%s;font-size:%dpt;caret-color:%s;}"
              /* colors */
-             ".path-bar{color:%s}"
-             ".statusbar label{color:%s}"
-             "headerbar{color:%s}"
-             "headerbar button,headerbar menubutton button,headerbar menubutton{color:%s}"
-             "notebook header tab{color:%s}"
-             "popover modelbutton{color:%s}"
-             "popover>contents,popover.menu>contents{color:%s}"
-             "window label{color:%s}"
-             "window checkbutton label{color:%s}",
+             ".path-bar{color:%s;}"
+             ".statusbar label{color:%s;}"
+             "headerbar{color:%s;}"
+             "headerbar button,headerbar menubutton button,headerbar menubutton{color:%s;}"
+             "notebook header tab{color:%s;}"
+             "popover modelbutton{color:%s;}"
+             "popover>contents,popover.menu>contents{color:%s;}"
+             "window label{color:%s;}"
+             "window checkbutton label{color:%s;}",
              /* GUI font args */
              win->settings.gui_font, win->settings.gui_font_size,
              win->settings.gui_font, win->settings.gui_font_size,
@@ -375,7 +383,6 @@ void vibe_window_apply_settings(VibeWindow *win) {
              win->settings.gui_font, win->settings.gui_font_size,
              /* per-section font args */
              win->settings.editor_font, win->settings.editor_font_size, win->settings.editor_font_weight, fg_full,
-             opacity_str, /* .file-viewer text opacity */
              win->settings.browser_font, win->settings.browser_font_size,
              fg_full,
              win->settings.prompt_font, win->settings.prompt_font_size, fg_full,
@@ -2379,6 +2386,12 @@ void vibe_window_toast(VibeWindow *win, const char *message) {
     vibe_toast(win, message);
 }
 
+static void ai_refresh_output(VibeWindow *win);
+
+void vibe_window_switch_ai_mode(VibeWindow *win) {
+    ai_refresh_output(win);
+}
+
 /* ── Save file ── */
 
 static void save_current_file(VibeWindow *win) {
@@ -2606,175 +2619,579 @@ static gboolean on_editor_key(GtkEventControllerKey *ctrl, guint keyval,
 /* ── Prompt key handler ── */
 
 /* Parse JSON response from claude --output-format json */
-/* ── Markdown rendering for AI output ── */
 
+/* ── Markdown rendering ── */
+
+#if 0  /* kept for reference but unused */
 static void ensure_md_tags(GtkTextBuffer *buf) {
-    /* Create tags only once */
-    if (gtk_text_tag_table_lookup(gtk_text_buffer_get_tag_table(buf), "md-bold"))
-        return;
+    if (gtk_text_tag_table_lookup(gtk_text_buffer_get_tag_table(buf), "md-bold")) return;
 
-    gtk_text_buffer_create_tag(buf, "md-bold", "weight", PANGO_WEIGHT_BOLD, NULL);
-    gtk_text_buffer_create_tag(buf, "md-italic", "style", PANGO_STYLE_ITALIC, NULL);
+    /* Default text tag — applied to ALL text so tags override it */
+    gtk_text_buffer_create_tag(buf, "md-default",
+        "family", "Sans", "foreground", "#d4d4d4", NULL);
+
+    gtk_text_buffer_create_tag(buf, "md-bold",
+        "weight", PANGO_WEIGHT_BOLD, "foreground", "#e8e8e8", NULL);
+    gtk_text_buffer_create_tag(buf, "md-italic",
+        "style", PANGO_STYLE_ITALIC, "foreground", "#cccccc", NULL);
     gtk_text_buffer_create_tag(buf, "md-code",
-        "family", "Monospace",
-        "background", "#2d2d2d",
-        "foreground", "#e6e6e6",
-        NULL);
+        "family", "Monospace", "background", "#2d2d2d", "foreground", "#ce9178", NULL);
     gtk_text_buffer_create_tag(buf, "md-codeblock",
-        "family", "Monospace",
-        "background", "#1e1e1e",
-        "foreground", "#d4d4d4",
-        "paragraph-background", "#1e1e1e",
-        "left-margin", 16,
-        "right-margin", 16,
-        "pixels-above-lines", 4,
-        "pixels-below-lines", 4,
-        NULL);
+        "family", "Monospace", "foreground", "#d4d4d4",
+        "paragraph-background", "#161616",
+        "left-margin", 16, "right-margin", 16,
+        "pixels-above-lines", 6, "pixels-below-lines", 6, NULL);
     gtk_text_buffer_create_tag(buf, "md-heading",
-        "weight", PANGO_WEIGHT_BOLD,
-        "scale", 1.2,
-        "pixels-above-lines", 8,
-        "pixels-below-lines", 4,
-        NULL);
+        "weight", PANGO_WEIGHT_BOLD, "scale", 1.3,
+        "foreground", "#e5c07b",
+        "pixels-above-lines", 12, "pixels-below-lines", 6, NULL);
+    gtk_text_buffer_create_tag(buf, "md-h2",
+        "weight", PANGO_WEIGHT_BOLD, "scale", 1.15,
+        "foreground", "#e5c07b",
+        "pixels-above-lines", 10, "pixels-below-lines", 4, NULL);
     gtk_text_buffer_create_tag(buf, "md-link",
-        "foreground", "#5b9bd5",
-        "underline", PANGO_UNDERLINE_SINGLE,
-        NULL);
+        "foreground", "#61afef", "underline", PANGO_UNDERLINE_SINGLE, NULL);
+    gtk_text_buffer_create_tag(buf, "md-math",
+        "family", "Monospace", "style", PANGO_STYLE_ITALIC, "foreground", "#c586c0", NULL);
+    gtk_text_buffer_create_tag(buf, "md-list-marker",
+        "foreground", "#888888", NULL);
 }
 
-/* Insert markdown-formatted text into buffer at the given position */
+/* Simple cmark AST walker — inserts formatted text with tags */
+static void render_cmark(cmark_node *node, GtkTextBuffer *buf, GtkTextIter *pos,
+                          GPtrArray *tag_stack, gboolean *need_nl) {
+    for (cmark_node *cur = node; cur; cur = cmark_node_next(cur)) {
+        cmark_node_type t = cmark_node_get_type(cur);
+        int mark;
+        GtkTextIter ts;
+
+        switch (t) {
+        case CMARK_NODE_DOCUMENT:
+            render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+            break;
+        case CMARK_NODE_PARAGRAPH:
+            if (*need_nl) gtk_text_buffer_insert(buf, pos, "\n", 1);
+            render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+            gtk_text_buffer_insert(buf, pos, "\n", 1);
+            *need_nl = FALSE;
+            break;
+        case CMARK_NODE_HEADING: {
+            if (*need_nl) gtk_text_buffer_insert(buf, pos, "\n", 1);
+            int lvl = cmark_node_get_heading_level(cur);
+            const char *htag = lvl <= 1 ? "md-heading" : "md-h2";
+            mark = gtk_text_iter_get_offset(pos);
+            g_ptr_array_add(tag_stack, (gpointer)htag);
+            render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+            g_ptr_array_remove_index(tag_stack, tag_stack->len - 1);
+            gtk_text_buffer_insert(buf, pos, "\n", 1);
+            gtk_text_buffer_get_iter_at_offset(buf, &ts, mark);
+            gtk_text_buffer_apply_tag_by_name(buf, htag, &ts, pos);
+            *need_nl = FALSE;
+            break;
+        }
+        case CMARK_NODE_CODE_BLOCK: {
+            if (*need_nl) gtk_text_buffer_insert(buf, pos, "\n", 1);
+            const char *code = cmark_node_get_literal(cur);
+            if (code) {
+                mark = gtk_text_iter_get_offset(pos);
+                int clen = (int)strlen(code);
+                if (clen > 0 && code[clen-1] == '\n') clen--;
+                gtk_text_buffer_insert(buf, pos, code, clen);
+                gtk_text_buffer_insert(buf, pos, "\n", 1);
+                gtk_text_buffer_get_iter_at_offset(buf, &ts, mark);
+                gtk_text_buffer_apply_tag_by_name(buf, "md-codeblock", &ts, pos);
+            }
+            *need_nl = FALSE;
+            break;
+        }
+        case CMARK_NODE_LIST:
+            render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+            break;
+        case CMARK_NODE_ITEM:
+            gtk_text_buffer_insert(buf, pos, "  \u2022 ", -1);
+            render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+            *need_nl = FALSE;
+            break;
+        case CMARK_NODE_BLOCK_QUOTE:
+            if (*need_nl) gtk_text_buffer_insert(buf, pos, "\n", 1);
+            gtk_text_buffer_insert(buf, pos, "\u2502 ", -1);
+            render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+            *need_nl = FALSE;
+            break;
+        case CMARK_NODE_THEMATIC_BREAK:
+            gtk_text_buffer_insert(buf, pos, "\n\u2500\u2500\u2500\n", -1);
+            *need_nl = FALSE;
+            break;
+        case CMARK_NODE_SOFTBREAK:
+            gtk_text_buffer_insert(buf, pos, " ", 1);
+            break;
+        case CMARK_NODE_LINEBREAK:
+            gtk_text_buffer_insert(buf, pos, "\n", 1);
+            break;
+        case CMARK_NODE_TEXT: {
+            const char *txt = cmark_node_get_literal(cur);
+            if (!txt) break;
+            /* Insert text with all active tags */
+            mark = gtk_text_iter_get_offset(pos);
+            gtk_text_buffer_insert(buf, pos, txt, -1);
+            gtk_text_buffer_get_iter_at_offset(buf, &ts, mark);
+            for (guint i = 0; i < tag_stack->len; i++)
+                gtk_text_buffer_apply_tag_by_name(buf, g_ptr_array_index(tag_stack, i), &ts, pos);
+            break;
+        }
+        case CMARK_NODE_CODE: {
+            const char *code = cmark_node_get_literal(cur);
+            if (code) {
+                mark = gtk_text_iter_get_offset(pos);
+                gtk_text_buffer_insert(buf, pos, code, -1);
+                gtk_text_buffer_get_iter_at_offset(buf, &ts, mark);
+                gtk_text_buffer_apply_tag_by_name(buf, "md-code", &ts, pos);
+            }
+            break;
+        }
+        case CMARK_NODE_STRONG:
+            g_ptr_array_add(tag_stack, (gpointer)"md-bold");
+            render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+            g_ptr_array_remove_index(tag_stack, tag_stack->len - 1);
+            break;
+        case CMARK_NODE_EMPH:
+            g_ptr_array_add(tag_stack, (gpointer)"md-italic");
+            render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+            g_ptr_array_remove_index(tag_stack, tag_stack->len - 1);
+            break;
+        case CMARK_NODE_LINK: {
+            mark = gtk_text_iter_get_offset(pos);
+            cmark_node *ch = cmark_node_first_child(cur);
+            if (ch && cmark_node_get_type(ch) == CMARK_NODE_TEXT)
+                gtk_text_buffer_insert(buf, pos, cmark_node_get_literal(ch), -1);
+            else
+                gtk_text_buffer_insert(buf, pos, cmark_node_get_url(cur), -1);
+            gtk_text_buffer_get_iter_at_offset(buf, &ts, mark);
+            gtk_text_buffer_apply_tag_by_name(buf, "md-link", &ts, pos);
+            break;
+        }
+        case CMARK_NODE_HTML_BLOCK:
+        case CMARK_NODE_HTML_INLINE: {
+            const char *h = cmark_node_get_literal(cur);
+            if (h) gtk_text_buffer_insert(buf, pos, h, -1);
+            break;
+        }
+        default: {
+            /* Handle GFM extension nodes by name (table, table_row, table_cell, etc.) */
+            const char *type_name = cmark_node_get_type_string(cur);
+            if (g_strcmp0(type_name, "table") == 0) {
+                if (*need_nl) gtk_text_buffer_insert(buf, pos, "\n", 1);
+                render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+                gtk_text_buffer_insert(buf, pos, "\n", 1);
+                *need_nl = FALSE;
+            } else if (g_strcmp0(type_name, "table_header") == 0) {
+                render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+                gtk_text_buffer_insert(buf, pos, "\n", 1);
+                /* Count cells for separator line */
+                int ncols = 0;
+                for (cmark_node *c = cmark_node_first_child(cur); c; c = cmark_node_next(c))
+                    ncols++;
+                for (int ci = 0; ci < ncols; ci++) {
+                    if (ci > 0) gtk_text_buffer_insert(buf, pos, "──┼──", -1);
+                    gtk_text_buffer_insert(buf, pos, "──────────", -1);
+                }
+                gtk_text_buffer_insert(buf, pos, "\n", 1);
+            } else if (g_strcmp0(type_name, "table_row") == 0) {
+                render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+                gtk_text_buffer_insert(buf, pos, "\n", 1);
+            } else if (g_strcmp0(type_name, "table_cell") == 0) {
+                /* Add separator before non-first cells */
+                cmark_node *prev = cmark_node_previous(cur);
+                if (prev) gtk_text_buffer_insert(buf, pos, "  │  ", -1);
+                /* Bold for header cells */
+                cmark_node *parent = cmark_node_parent(cur);
+                gboolean is_header = (g_strcmp0(cmark_node_get_type_string(parent), "table_header") == 0);
+                if (is_header) g_ptr_array_add(tag_stack, (gpointer)"md-bold");
+                render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+                if (is_header) g_ptr_array_remove_index(tag_stack, tag_stack->len - 1);
+            } else {
+                if (cmark_node_first_child(cur))
+                    render_cmark(cmark_node_first_child(cur), buf, pos, tag_stack, need_nl);
+            }
+            break;
+        }
+        }
+    }
+}
+
+#endif /* end old GtkTextBuffer functions */
+
+/* Convert LaTeX expression to Unicode approximation */
+static char *latex_to_unicode(const char *latex) {
+    GString *out = g_string_new(NULL);
+    /* Common LaTeX command → Unicode mappings */
+    static const struct { const char *cmd; const char *uni; } syms[] = {
+        {"\\sum", "∑"}, {"\\prod", "∏"}, {"\\int", "∫"},
+        {"\\infty", "∞"}, {"\\alpha", "α"}, {"\\beta", "β"},
+        {"\\gamma", "γ"}, {"\\delta", "δ"}, {"\\epsilon", "ε"},
+        {"\\theta", "θ"}, {"\\lambda", "λ"}, {"\\mu", "μ"},
+        {"\\pi", "π"}, {"\\sigma", "σ"}, {"\\phi", "φ"}, {"\\omega", "ω"},
+        {"\\Delta", "Δ"}, {"\\Sigma", "Σ"}, {"\\Pi", "Π"}, {"\\Omega", "Ω"},
+        {"\\pm", "±"}, {"\\times", "×"}, {"\\div", "÷"},
+        {"\\neq", "≠"}, {"\\leq", "≤"}, {"\\geq", "≥"},
+        {"\\approx", "≈"}, {"\\equiv", "≡"},
+        {"\\leftarrow", "←"}, {"\\rightarrow", "→"},
+        {"\\Leftarrow", "⇐"}, {"\\Rightarrow", "⇒"},
+        {"\\partial", "∂"}, {"\\nabla", "∇"},
+        {"\\forall", "∀"}, {"\\exists", "∃"},
+        {"\\in", "∈"}, {"\\notin", "∉"},
+        {"\\subset", "⊂"}, {"\\subseteq", "⊆"},
+        {"\\cup", "∪"}, {"\\cap", "∩"},
+        {"\\cdot", "·"}, {"\\ldots", "…"}, {"\\cdots", "⋯"},
+        {"\\sqrt", "√"}, {"\\langle", "⟨"}, {"\\rangle", "⟩"},
+        {"\\frac", "/"}, {"\\to", "→"},
+    };
+    /* Superscript/subscript digit maps */
+    static const char *sup_digits[] = {"⁰","¹","²","³","⁴","⁵","⁶","⁷","⁸","⁹"};
+    static const char *sub_digits[] = {"₀","₁","₂","₃","₄","₅","₆","₇","₈","₉"};
+    static const char *sup_letters = "ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖ qʳˢᵗᵘᵛʷˣʸᶻ";
+    static const char *sub_letters = "ₐ   ₑ  ₕᵢⱼₖₗₘₙₒₚ ᵣₛₜᵤᵥ ₓ  ";
+
+    const char *p = latex;
+    while (*p) {
+        /* Skip \left, \right — just decorators */
+        if (strncmp(p, "\\left", 5) == 0) { p += 5; continue; }
+        if (strncmp(p, "\\right", 6) == 0) { p += 6; continue; }
+
+        /* Check LaTeX commands */
+        if (*p == '\\' && g_ascii_isalpha(p[1])) {
+            gboolean found = FALSE;
+            for (size_t i = 0; i < G_N_ELEMENTS(syms); i++) {
+                size_t cl = strlen(syms[i].cmd);
+                if (strncmp(p, syms[i].cmd, cl) == 0 &&
+                    !g_ascii_isalpha(p[cl])) {
+                    g_string_append(out, syms[i].uni);
+                    p += cl;
+                    found = TRUE;
+                    break;
+                }
+            }
+            if (!found) {
+                /* Unknown command — skip backslash, show name */
+                p++;
+                while (*p && g_ascii_isalpha(*p))
+                    p++;
+            }
+            continue;
+        }
+        /* Superscript: ^X or ^{...} */
+        if (*p == '^') {
+            p++;
+            const char *content; size_t clen;
+            if (*p == '{') {
+                p++;
+                const char *end = strchr(p, '}');
+                if (!end) break;
+                content = p; clen = (size_t)(end - p);
+                p = end + 1;
+            } else {
+                content = p; clen = 1; p++;
+            }
+            for (size_t i = 0; i < clen; i++) {
+                char c = content[i];
+                if (c >= '0' && c <= '9')
+                    g_string_append(out, sup_digits[(int)(c - '0')]);
+                else if (c >= 'a' && c <= 'z') {
+                    const char *s = g_utf8_offset_to_pointer(sup_letters, c - 'a');
+                    if (s && *s != ' ')
+                        g_string_append_len(out, s, (gssize)(g_utf8_next_char(s) - s));
+                    else
+                        g_string_append_c(out, c);
+                }
+                else if (c == '+') g_string_append(out, "⁺");
+                else if (c == '-') g_string_append(out, "⁻");
+                else if (c == '=') g_string_append(out, "⁼");
+                else if (c == '(') g_string_append(out, "⁽");
+                else if (c == ')') g_string_append(out, "⁾");
+                else g_string_append_c(out, c);
+            }
+            continue;
+        }
+        /* Subscript: _X or _{...} */
+        if (*p == '_') {
+            p++;
+            const char *content; size_t clen;
+            if (*p == '{') {
+                p++;
+                const char *end = strchr(p, '}');
+                if (!end) break;
+                content = p; clen = (size_t)(end - p);
+                p = end + 1;
+            } else {
+                content = p; clen = 1; p++;
+            }
+            for (size_t i = 0; i < clen; i++) {
+                char c = content[i];
+                if (c >= '0' && c <= '9')
+                    g_string_append(out, sub_digits[(int)(c - '0')]);
+                else if (c >= 'a' && c <= 'z') {
+                    const char *s = g_utf8_offset_to_pointer(sub_letters, c - 'a');
+                    if (s && *s != ' ')
+                        g_string_append_len(out, s, (gssize)(g_utf8_next_char(s) - s));
+                    else
+                        g_string_append_c(out, c);
+                }
+                else if (c == '+') g_string_append(out, "₊");
+                else if (c == '-') g_string_append(out, "₋");
+                else if (c == '=') g_string_append(out, "₌");
+                else if (c == '(') g_string_append(out, "₍");
+                else if (c == ')') g_string_append(out, "₎");
+                else g_string_append_c(out, c);
+            }
+            continue;
+        }
+        /* Skip braces, spaces pass through */
+        if (*p == '{' || *p == '}') { p++; continue; }
+        /* Regular character */
+        const char *next = g_utf8_next_char(p);
+        g_string_append_len(out, p, (gssize)(next - p));
+        p = next;
+    }
+    return g_string_free(out, FALSE);
+}
+
+#if 0 /* old insert_markdown - unused */
 static void insert_markdown(GtkTextBuffer *buf, GtkTextIter *pos, const char *text) {
     ensure_md_tags(buf);
 
+    /* Step 1: Extract $...$ and $$...$$ into a separate array, replace with
+       placeholders `MATH0`, `MATH1`, etc. so cmark doesn't mangle LaTeX. */
+    GPtrArray *math_exprs = g_ptr_array_new_with_free_func(g_free);
+    GString *safe = g_string_new(NULL);
     const char *p = text;
-    gboolean in_codeblock = FALSE;
-
     while (*p) {
-        /* Code block: ```...``` */
-        if (!in_codeblock && strncmp(p, "```", 3) == 0) {
-            /* Skip opening ``` and optional language name */
-            p += 3;
-            while (*p && *p != '\n') p++;
-            if (*p == '\n') p++;
-            in_codeblock = TRUE;
-
-            /* Find closing ``` */
-            const char *block_end = strstr(p, "\n```");
-            if (!block_end) block_end = p + strlen(p);
-
-            /* Insert the code block content with tag */
-            int mark_offset = gtk_text_iter_get_offset(pos);
-            gtk_text_buffer_insert(buf, pos, p, (int)(block_end - p));
-            gtk_text_buffer_insert(buf, pos, "\n", 1);
-            GtkTextIter tag_start;
-            gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
-            gtk_text_buffer_apply_tag_by_name(buf, "md-codeblock", &tag_start, pos);
-
-            p = block_end;
-            if (*p == '\n') p++;
-            if (strncmp(p, "```", 3) == 0) {
-                p += 3;
-                if (*p == '\n') p++;
+        /* $$block$$ */
+        if (p[0] == '$' && p[1] == '$') {
+            const char *close = strstr(p + 2, "$$");
+            if (close) {
+                char *expr = g_strndup(p + 2, (gsize)(close - p - 2));
+                g_string_append_printf(safe, "`MATH%u`", math_exprs->len);
+                g_ptr_array_add(math_exprs, expr);
+                p = close + 2;
+                continue;
             }
-            in_codeblock = FALSE;
-            continue;
         }
-
-        /* Process line by line */
-        const char *line_end = strchr(p, '\n');
-        if (!line_end) line_end = p + strlen(p);
-        int line_len = (int)(line_end - p);
-
-        /* Heading: # ... */
-        if (line_len > 2 && p[0] == '#' && p[1] == ' ') {
-            const char *h = p + 2;
-            int hlen = line_len - 2;
-            int mark_offset = gtk_text_iter_get_offset(pos);
-            gtk_text_buffer_insert(buf, pos, h, hlen);
-            gtk_text_buffer_insert(buf, pos, "\n", 1);
-            GtkTextIter tag_start;
-            gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
-            gtk_text_buffer_apply_tag_by_name(buf, "md-heading", &tag_start, pos);
-            p = line_end;
-            if (*p == '\n') p++;
-            continue;
+        /* $inline$ */
+        if (p[0] == '$' && (p[1] != '$')) {
+            const char *close = strchr(p + 1, '$');
+            if (close && close > p + 1 && !memchr(p + 1, '\n', (size_t)(close - p - 1))) {
+                char *expr = g_strndup(p + 1, (gsize)(close - p - 1));
+                g_string_append_printf(safe, "`MATH%u`", math_exprs->len);
+                g_ptr_array_add(math_exprs, expr);
+                p = close + 1;
+                continue;
+            }
         }
+        /* Regular character (UTF-8 safe) */
+        const char *next = g_utf8_next_char(p);
+        g_string_append_len(safe, p, (gssize)(next - p));
+        p = next;
+    }
 
-        /* Process inline formatting within the line */
-        const char *lp = p;
-        while (lp < p + line_len) {
-            /* Bold: **text** */
-            if (lp + 1 < p + line_len && lp[0] == '*' && lp[1] == '*') {
-                const char *end = strstr(lp + 2, "**");
-                if (end && end < p + line_len) {
-                    int mark_offset = gtk_text_iter_get_offset(pos);
-                    gtk_text_buffer_insert(buf, pos, lp + 2, (int)(end - lp - 2));
-                    GtkTextIter tag_start;
-                    gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
-                    gtk_text_buffer_apply_tag_by_name(buf, "md-bold", &tag_start, pos);
-                    lp = end + 2;
-                    continue;
-                }
-            }
+    /* Step 2: Parse the safe markdown (no $ or LaTeX) with cmark-gfm */
+    cmark_gfm_core_extensions_ensure_registered();
+    cmark_parser *parser = cmark_parser_new(CMARK_OPT_DEFAULT);
+    const char *ext_names[] = {"table", "strikethrough", "autolink", NULL};
+    for (int i = 0; ext_names[i]; i++) {
+        cmark_syntax_extension *ext = cmark_find_syntax_extension(ext_names[i]);
+        if (ext) cmark_parser_attach_syntax_extension(parser, ext);
+    }
+    cmark_parser_feed(parser, safe->str, safe->len);
+    cmark_node *doc = cmark_parser_finish(parser);
 
-            /* Inline code: `text` */
-            if (lp[0] == '`') {
-                const char *end = strchr(lp + 1, '`');
-                if (end && end < p + line_len) {
-                    int mark_offset = gtk_text_iter_get_offset(pos);
-                    gtk_text_buffer_insert(buf, pos, lp + 1, (int)(end - lp - 1));
-                    GtkTextIter tag_start;
-                    gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
-                    gtk_text_buffer_apply_tag_by_name(buf, "md-code", &tag_start, pos);
-                    lp = end + 1;
-                    continue;
-                }
-            }
+    GPtrArray *tag_stack = g_ptr_array_new();
+    gboolean need_nl = FALSE;
+    render_cmark(doc, buf, pos, tag_stack, &need_nl);
+    g_ptr_array_unref(tag_stack);
 
-            /* Link: [text](url) */
-            if (lp[0] == '[') {
-                const char *bracket_end = strchr(lp + 1, ']');
-                if (bracket_end && bracket_end + 1 < p + line_len && bracket_end[1] == '(') {
-                    const char *paren_end = strchr(bracket_end + 2, ')');
-                    if (paren_end && paren_end <= p + line_len) {
-                        int mark_offset = gtk_text_iter_get_offset(pos);
-                        gtk_text_buffer_insert(buf, pos, lp + 1, (int)(bracket_end - lp - 1));
-                        GtkTextIter tag_start;
-                        gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
-                        gtk_text_buffer_apply_tag_by_name(buf, "md-link", &tag_start, pos);
-                        lp = paren_end + 1;
+    cmark_node_free(doc);
+    cmark_parser_free(parser);
+    g_string_free(safe, TRUE);
+
+    /* Step 3: Find `MATHn` placeholders in buffer, replace with original LaTeX, apply math tag */
+    for (guint i = 0; i < math_exprs->len; i++) {
+        const char *expr = g_ptr_array_index(math_exprs, i);
+        char placeholder[32];
+        snprintf(placeholder, sizeof(placeholder), "MATH%u", i);
+
+        GtkTextIter search_start;
+        gtk_text_buffer_get_start_iter(buf, &search_start);
+        GtkTextIter match_s, match_e;
+        if (gtk_text_iter_forward_search(&search_start, placeholder,
+                                          GTK_TEXT_SEARCH_TEXT_ONLY,
+                                          &match_s, &match_e, NULL)) {
+            /* Delete placeholder */
+            gtk_text_buffer_delete(buf, &match_s, &match_e);
+            /* Convert LaTeX to Unicode and insert with math tag */
+            char *rendered = latex_to_unicode(expr);
+            int mark = gtk_text_iter_get_offset(&match_s);
+            gtk_text_buffer_insert(buf, &match_s, rendered, -1);
+            g_free(rendered);
+            GtkTextIter ts;
+            gtk_text_buffer_get_iter_at_offset(buf, &ts, mark);
+            gtk_text_buffer_apply_tag_by_name(buf, "md-math", &ts, &match_s);
+        }
+    }
+    g_ptr_array_unref(math_exprs);
+}
+#endif /* kept for reference */
+
+/* CSS for the AI markdown webview — dark and light variants */
+static const char *ai_webview_css_dark =
+    "body { font-family: 'Inter', 'Cantarell', sans-serif; font-size: 14px;"
+    "  color: #d4d4d4; background: #1e1e1e; margin: 12px 16px; line-height: 1.6; }"
+    "h1,h2,h3,h4,h5,h6 { color: #e5c07b; margin-top: 1em; margin-bottom: 0.4em; }"
+    "h1 { font-size: 1.4em; } h2 { font-size: 1.25em; } h3 { font-size: 1.1em; }"
+    "strong { color: #e8e8e8; } em { color: #cccccc; }"
+    "code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em;"
+    "  background: #2d2d2d; color: #ce9178; padding: 2px 5px; border-radius: 3px; }"
+    "pre { background: #161616; border-radius: 6px; padding: 12px 14px;"
+    "  overflow-x: auto; margin: 0.8em 0; }"
+    "pre code { background: none; color: #d4d4d4; padding: 0; }"
+    "a { color: #61afef; } blockquote { border-left: 3px solid #555; padding-left: 12px; color: #999; margin: 0.5em 0; }"
+    "table { border-collapse: collapse; margin: 0.8em 0; width: auto; }"
+    "th, td { border: 1px solid #444; padding: 6px 12px; text-align: left; }"
+    "th { background: #2a2a2a; color: #e5c07b; font-weight: bold; }"
+    "tr:nth-child(even) { background: #252525; }"
+    "hr { border: none; border-top: 1px solid #444; margin: 1.2em 0; }"
+    "ul, ol { padding-left: 1.6em; } li { margin: 0.2em 0; }"
+    "del { color: #888; }"
+    ".math { font-family: 'JetBrains Mono', monospace; font-style: italic; color: #c586c0; }"
+    "img { max-width: 100%; }"
+    "::-webkit-scrollbar { width: 8px; }"
+    "::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }"
+    "::-webkit-scrollbar-track { background: #1e1e1e; }";
+
+static const char *ai_webview_css_light =
+    "body { font-family: 'Inter', 'Cantarell', sans-serif; font-size: 14px;"
+    "  color: #1e1e1e; background: #ffffff; margin: 12px 16px; line-height: 1.6; }"
+    "h1,h2,h3,h4,h5,h6 { color: #986801; margin-top: 1em; margin-bottom: 0.4em; }"
+    "h1 { font-size: 1.4em; } h2 { font-size: 1.25em; } h3 { font-size: 1.1em; }"
+    "strong { color: #1a1a1a; } em { color: #333; }"
+    "code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em;"
+    "  background: #f0f0f0; color: #c7254e; padding: 2px 5px; border-radius: 3px; }"
+    "pre { background: #f6f8fa; border-radius: 6px; padding: 12px 14px;"
+    "  overflow-x: auto; margin: 0.8em 0; border: 1px solid #e1e4e8; }"
+    "pre code { background: none; color: #24292e; padding: 0; }"
+    "a { color: #0366d6; } blockquote { border-left: 3px solid #ccc; padding-left: 12px; color: #666; margin: 0.5em 0; }"
+    "table { border-collapse: collapse; margin: 0.8em 0; width: auto; }"
+    "th, td { border: 1px solid #d0d7de; padding: 6px 12px; text-align: left; }"
+    "th { background: #f0f3f6; color: #1a1a1a; font-weight: bold; }"
+    "tr:nth-child(even) { background: #f6f8fa; }"
+    "hr { border: none; border-top: 1px solid #d0d7de; margin: 1.2em 0; }"
+    "ul, ol { padding-left: 1.6em; } li { margin: 0.2em 0; }"
+    "del { color: #999; }"
+    ".math { font-family: 'JetBrains Mono', monospace; font-style: italic; color: #9c27b0; }"
+    "img { max-width: 100%; }"
+    "::-webkit-scrollbar { width: 8px; }"
+    "::-webkit-scrollbar-thumb { background: #c0c0c0; border-radius: 4px; }"
+    "::-webkit-scrollbar-track { background: #f0f0f0; }";
+
+/* Refresh AI output — render markdown to HTML and load in WebView */
+static void ai_refresh_output(VibeWindow *win) {
+    if (!win->ai_conversation_md) return;
+
+    /* Pick CSS based on current theme (dark vs light) */
+    AdwStyleManager *sm = adw_style_manager_get_default();
+    gboolean is_dark = adw_style_manager_get_dark(sm);
+
+    GString *html = g_string_new(
+        "<!DOCTYPE html><html><head>"
+        "<meta charset='utf-8'>"
+        "<style>");
+    g_string_append(html, is_dark ? ai_webview_css_dark : ai_webview_css_light);
+    g_string_append(html, "</style></head><body>");
+
+    if (win->ai_conversation_md->len > 0) {
+        if (win->settings.ai_markdown) {
+            /* Step 1: Extract LaTeX, replace with placeholders */
+            GPtrArray *math_exprs = g_ptr_array_new_with_free_func(g_free);
+            GString *safe = g_string_new(NULL);
+            const char *p = win->ai_conversation_md->str;
+            while (*p) {
+                if (p[0] == '$' && p[1] == '$') {
+                    const char *close = strstr(p + 2, "$$");
+                    if (close) {
+                        char *expr = g_strndup(p + 2, (gsize)(close - p - 2));
+                        g_string_append_printf(safe, "<span class='math'>MATHPH%u</span>",
+                                               math_exprs->len);
+                        g_ptr_array_add(math_exprs, expr);
+                        p = close + 2;
                         continue;
                     }
                 }
-            }
-
-            /* Italic: *text* (single asterisk, not bold) */
-            if (lp[0] == '*' && (lp + 1 >= p + line_len || lp[1] != '*')) {
-                const char *end = strchr(lp + 1, '*');
-                if (end && end < p + line_len && (end + 1 >= p + line_len || end[1] != '*')) {
-                    int mark_offset = gtk_text_iter_get_offset(pos);
-                    gtk_text_buffer_insert(buf, pos, lp + 1, (int)(end - lp - 1));
-                    GtkTextIter tag_start;
-                    gtk_text_buffer_get_iter_at_offset(buf, &tag_start, mark_offset);
-                    gtk_text_buffer_apply_tag_by_name(buf, "md-italic", &tag_start, pos);
-                    lp = end + 1;
-                    continue;
+                if (p[0] == '$' && p[1] != '$') {
+                    const char *close = strchr(p + 1, '$');
+                    if (close && close > p + 1 && !memchr(p + 1, '\n', (size_t)(close - p - 1))) {
+                        char *expr = g_strndup(p + 1, (gsize)(close - p - 1));
+                        g_string_append_printf(safe, "<span class='math'>MATHPH%u</span>",
+                                               math_exprs->len);
+                        g_ptr_array_add(math_exprs, expr);
+                        p = close + 1;
+                        continue;
+                    }
                 }
+                const char *next = g_utf8_next_char(p);
+                g_string_append_len(safe, p, (gssize)(next - p));
+                p = next;
             }
 
-            /* Regular character */
-            gtk_text_buffer_insert(buf, pos, lp, 1);
-            lp++;
-        }
+            /* Step 2: Parse with cmark-gfm to HTML */
+            cmark_gfm_core_extensions_ensure_registered();
+            cmark_parser *parser = cmark_parser_new(CMARK_OPT_DEFAULT | CMARK_OPT_UNSAFE);
+            const char *ext_names[] = {"table", "strikethrough", "autolink", NULL};
+            for (int i = 0; ext_names[i]; i++) {
+                cmark_syntax_extension *ext = cmark_find_syntax_extension(ext_names[i]);
+                if (ext) cmark_parser_attach_syntax_extension(parser, ext);
+            }
+            cmark_parser_feed(parser, safe->str, safe->len);
+            cmark_node *doc = cmark_parser_finish(parser);
+            char *rendered = cmark_render_html(doc, CMARK_OPT_DEFAULT | CMARK_OPT_UNSAFE,
+                                              cmark_parser_get_syntax_extensions(parser));
 
-        /* End of line */
-        if (*line_end == '\n') {
-            gtk_text_buffer_insert(buf, pos, "\n", 1);
-            p = line_end + 1;
+            /* Step 3: Replace MATHPH placeholders with Unicode-rendered LaTeX */
+            GString *final_html = g_string_new(rendered);
+            for (guint i = 0; i < math_exprs->len; i++) {
+                const char *expr = g_ptr_array_index(math_exprs, i);
+                char placeholder[32];
+                snprintf(placeholder, sizeof(placeholder), "MATHPH%u", i);
+                char *uni = latex_to_unicode(expr);
+                char *pos_str = strstr(final_html->str, placeholder);
+                if (pos_str) {
+                    gsize off = (gsize)(pos_str - final_html->str);
+                    g_string_erase(final_html, (gssize)off, strlen(placeholder));
+                    g_string_insert(final_html, (gssize)off, uni);
+                }
+                g_free(uni);
+            }
+
+            g_string_append(html, final_html->str);
+            g_string_free(final_html, TRUE);
+            free(rendered);
+            cmark_node_free(doc);
+            cmark_parser_free(parser);
+            g_string_free(safe, TRUE);
+            g_ptr_array_unref(math_exprs);
         } else {
-            p = line_end;
+            /* Raw text mode */
+            char *escaped = g_markup_escape_text(win->ai_conversation_md->str, -1);
+            g_string_append(html, "<pre>");
+            g_string_append(html, escaped);
+            g_string_append(html, "</pre>");
+            g_free(escaped);
         }
     }
+
+    g_string_append(html, "<script>window.scrollTo(0, document.body.scrollHeight);</script>");
+    g_string_append(html, "</body></html>");
+
+    webkit_web_view_load_html(win->ai_webview, html->str, NULL);
+    g_string_free(html, TRUE);
 }
 
 static void ai_parse_and_display(VibeWindow *win) {
@@ -2786,13 +3203,39 @@ static void ai_parse_and_display(VibeWindow *win) {
     GString *result_text = g_string_new(NULL);
     if (rp) {
         rp += strlen(result_key);
-        while (*rp && !(rp[0] == '"' && rp[-1] != '\\')) {
+        while (*rp && *rp != '"') {
             if (rp[0] == '\\' && rp[1]) {
                 switch (rp[1]) {
                     case 'n': g_string_append_c(result_text, '\n'); break;
                     case 't': g_string_append_c(result_text, '\t'); break;
-                    case '"': g_string_append_c(result_text, '"'); break;
-                    case '\\': g_string_append_c(result_text, '\\'); break;
+                    case 'r': g_string_append_c(result_text, '\r'); break;
+                    case 'b': g_string_append_c(result_text, '\b'); break;
+                    case 'f': g_string_append_c(result_text, '\f'); break;
+                    case '"': g_string_append_c(result_text, '"'); rp += 2; continue;
+                    case '\\': g_string_append_c(result_text, '\\'); rp += 2; continue;
+                    case '/': g_string_append_c(result_text, '/'); break;
+                    case 'u': {
+                        /* \uXXXX Unicode escape */
+                        if (rp[2] && rp[3] && rp[4] && rp[5]) {
+                            char hex[5] = { rp[2], rp[3], rp[4], rp[5], 0 };
+                            gunichar cp = (gunichar)strtoul(hex, NULL, 16);
+                            /* Handle UTF-16 surrogate pairs */
+                            if (cp >= 0xD800 && cp <= 0xDBFF &&
+                                rp[6] == '\\' && rp[7] == 'u') {
+                                char hex2[5] = { rp[8], rp[9], rp[10], rp[11], 0 };
+                                gunichar lo = (gunichar)strtoul(hex2, NULL, 16);
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                rp += 6; /* extra 6 for second \uXXXX */
+                            }
+                            char utf8[7];
+                            int len = g_unichar_to_utf8(cp, utf8);
+                            g_string_append_len(result_text, utf8, len);
+                            rp += 6; /* skip \uXXXX */
+                            continue;
+                        }
+                        g_string_append_c(result_text, rp[1]);
+                        break;
+                    }
                     default: g_string_append_c(result_text, rp[1]); break;
                 }
                 rp += 2;
@@ -2806,21 +3249,15 @@ static void ai_parse_and_display(VibeWindow *win) {
         g_string_append(result_text, json);
     }
 
-    /* Display result in output view with markdown formatting */
-    GtkTextIter end;
-    gtk_text_buffer_get_end_iter(win->ai_output_buffer, &end);
-    insert_markdown(win->ai_output_buffer, &end, result_text->str);
-    gtk_text_buffer_get_end_iter(win->ai_output_buffer, &end);
-    gtk_text_buffer_insert(win->ai_output_buffer, &end, "\n\n", 2);
+    /* Append to conversation markdown and refresh webview */
+    if (!win->ai_conversation_md)
+        win->ai_conversation_md = g_string_new(NULL);
+    g_string_append(win->ai_conversation_md, result_text->str);
+    g_string_append(win->ai_conversation_md, "\n\n");
 
-    /* Keep result text for logging — freed after log */
     char *result_for_log = g_string_free(result_text, FALSE);
 
-    /* Scroll to bottom */
-    gtk_text_buffer_get_end_iter(win->ai_output_buffer, &end);
-    GtkTextMark *mark = gtk_text_buffer_get_insert(win->ai_output_buffer);
-    gtk_text_buffer_move_mark(win->ai_output_buffer, mark, &end);
-    gtk_text_view_scroll_mark_onscreen(win->ai_output_view, mark);
+    ai_refresh_output(win);
 
     /* Extract session_id for --resume */
     const char *sid_key = "\"session_id\":\"";
@@ -2921,6 +3358,12 @@ static void on_ai_communicate_done(GObject *src, GAsyncResult *res, gpointer dat
 
     g_subprocess_communicate_finish(G_SUBPROCESS(src), res, &stdout_bytes, NULL, &err);
 
+    /* Stop elapsed timer */
+    if (win->ai_timer_id) {
+        g_source_remove(win->ai_timer_id);
+        win->ai_timer_id = 0;
+    }
+
     if (stdout_bytes) {
         gsize len;
         const char *json = g_bytes_get_data(stdout_bytes, &len);
@@ -2929,15 +3372,34 @@ static void on_ai_communicate_done(GObject *src, GAsyncResult *res, gpointer dat
         g_bytes_unref(stdout_bytes);
         ai_parse_and_display(win);
     } else if (err) {
-        GtkTextIter end;
-        gtk_text_buffer_get_end_iter(win->ai_output_buffer, &end);
-        char *msg = g_strdup_printf("Error: %s\n", err->message);
-        gtk_text_buffer_insert(win->ai_output_buffer, &end, msg, -1);
-        g_free(msg);
+        if (!win->ai_conversation_md)
+            win->ai_conversation_md = g_string_new(NULL);
+        g_string_append_printf(win->ai_conversation_md, "\n\n**Error:** %s\n\n", err->message);
+        ai_refresh_output(win);
         g_error_free(err);
     }
 
     g_clear_object(&win->ai_proc);
+}
+
+/* ── AI elapsed time timer ── */
+
+static gboolean ai_timer_tick(gpointer data) {
+    VibeWindow *win = data;
+    if (!win->ai_proc) {
+        win->ai_timer_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    gint64 now = g_get_monotonic_time();
+    double elapsed = (now - win->ai_start_time) / 1e6;
+    char buf[64];
+    if (elapsed >= 60.0)
+        snprintf(buf, sizeof(buf), "thinking… %.0fm%.0fs",
+                 elapsed / 60.0, fmod(elapsed, 60.0));
+    else
+        snprintf(buf, sizeof(buf), "thinking… %.1fs", elapsed);
+    gtk_label_set_text(win->ai_status_label, buf);
+    return G_SOURCE_CONTINUE;
 }
 
 static void send_prompt_to_ai(VibeWindow *win) {
@@ -2957,16 +3419,19 @@ static void send_prompt_to_ai(VibeWindow *win) {
     g_free(win->ai_last_prompt);
     win->ai_last_prompt = g_strdup(text);
 
-    /* Show prompt in output view */
-    GtkTextIter out_end;
-    gtk_text_buffer_get_end_iter(win->ai_output_buffer, &out_end);
-    char *prompt_line = g_strdup_printf(">>> %s\n\n", text);
-    gtk_text_buffer_insert(win->ai_output_buffer, &out_end, prompt_line, -1);
-    g_free(prompt_line);
+    /* Append prompt to conversation and refresh webview */
+    if (!win->ai_conversation_md)
+        win->ai_conversation_md = g_string_new(NULL);
+    char *prompt_md = g_strdup_printf("*>>> %s*\n\n---\n\n", text);
+    g_string_append(win->ai_conversation_md, prompt_md);
+    g_free(prompt_md);
+    ai_refresh_output(win);
 
-    /* Update status + start timer */
-    gtk_label_set_text(win->ai_status_label, "thinking...");
+    /* Update status + start elapsed timer */
     win->ai_start_time = g_get_monotonic_time();
+    gtk_label_set_text(win->ai_status_label, "thinking… 0.0s");
+    if (win->ai_timer_id) g_source_remove(win->ai_timer_id);
+    win->ai_timer_id = g_timeout_add(100, ai_timer_tick, win);
 
     /* Spawn: claude -p "text" --output-format json [--resume SESSION_ID]
      * Model is NOT passed — uses whatever the user configured via
@@ -3012,7 +3477,7 @@ static void send_prompt_to_ai(VibeWindow *win) {
     g_ptr_array_add(argv, NULL);
 
     GSubprocessLauncher *launcher = g_subprocess_launcher_new(
-        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE);
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
 
     /* Use terminal's CWD as working directory for claude */
     const char *term_uri = vte_terminal_get_termprop_string(win->terminal, VTE_TERMPROP_CURRENT_DIRECTORY_URI, NULL);
@@ -3038,10 +3503,9 @@ static void send_prompt_to_ai(VibeWindow *win) {
     g_ptr_array_unref(argv);
 
     if (!win->ai_proc) {
-        gtk_text_buffer_get_end_iter(win->ai_output_buffer, &out_end);
-        char *errmsg = g_strdup_printf("Error: %s\n", err ? err->message : "unknown");
-        gtk_text_buffer_insert(win->ai_output_buffer, &out_end, errmsg, -1);
-        g_free(errmsg);
+        g_string_append_printf(win->ai_conversation_md,
+            "\n\n**Error:** %s\n\n", err ? err->message : "unknown");
+        ai_refresh_output(win);
         if (err) g_error_free(err);
         g_free(text);
         gtk_label_set_text(win->ai_status_label, "error");
@@ -3249,8 +3713,10 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
     g_cancellable_cancel(win->cancellable);
 
     /* Clean up AI process */
+    if (win->ai_timer_id) { g_source_remove(win->ai_timer_id); win->ai_timer_id = 0; }
     g_free(win->ai_last_prompt);
     if (win->ai_response_buf) { g_string_free(win->ai_response_buf, TRUE); win->ai_response_buf = NULL; }
+    if (win->ai_conversation_md) { g_string_free(win->ai_conversation_md, TRUE); win->ai_conversation_md = NULL; }
     if (win->ai_proc) {
         g_subprocess_force_exit(win->ai_proc);
         g_clear_object(&win->ai_proc);
@@ -3747,22 +4213,36 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     gtk_paned_set_shrink_start_child(GTK_PANED(ai_paned), FALSE);
     gtk_paned_set_shrink_end_child(GTK_PANED(ai_paned), FALSE);
 
-    win->ai_output_view = GTK_TEXT_VIEW(gtk_text_view_new());
-    win->ai_output_buffer = gtk_text_view_get_buffer(win->ai_output_view);
-    gtk_text_view_set_editable(win->ai_output_view, FALSE);
-    gtk_text_view_set_cursor_visible(win->ai_output_view, FALSE);
-    gtk_text_view_set_wrap_mode(win->ai_output_view, GTK_WRAP_WORD_CHAR);
-    gtk_text_view_set_left_margin(win->ai_output_view, 8);
-    gtk_text_view_set_right_margin(win->ai_output_view, 8);
-    gtk_text_view_set_top_margin(win->ai_output_view, 8);
-    gtk_text_view_set_monospace(win->ai_output_view, TRUE);
-    gtk_widget_add_css_class(GTK_WIDGET(win->ai_output_view), "prompt-view");
+    /* Output: WebKitWebView for proper markdown/HTML rendering */
+    win->ai_webview = WEBKIT_WEB_VIEW(webkit_web_view_new());
+    gtk_widget_set_vexpand(GTK_WIDGET(win->ai_webview), TRUE);
+    /* Disable hardware acceleration — avoids GBM/GPU errors in some environments */
+    WebKitSettings *wk_settings = webkit_web_view_get_settings(win->ai_webview);
+    webkit_settings_set_hardware_acceleration_policy(wk_settings,
+        WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
+    /* Transparent background so it blends with the app theme */
+    GdkRGBA transparent = {0, 0, 0, 0};
+    webkit_web_view_set_background_color(win->ai_webview, &transparent);
 
-    GtkWidget *ai_output_scroll = gtk_scrolled_window_new();
-    gtk_widget_set_vexpand(ai_output_scroll, TRUE);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(ai_output_scroll),
-                                   GTK_WIDGET(win->ai_output_view));
-    gtk_paned_set_start_child(GTK_PANED(ai_paned), ai_output_scroll);
+    /* Demo content */
+    win->ai_conversation_md = g_string_new(
+        "# Vibe Light AI\n\n"
+        "Send a prompt below. Supports **Markdown** and `code`.\n\n"
+        "### Features\n\n"
+        "- **Bold**, *italic*, `inline code`\n"
+        "- Code blocks with syntax highlighting\n"
+        "- Tables, lists, blockquotes\n"
+        "- LaTeX: $E = mc^2$, $$\\sum_{i=1}^{n} i$$\n\n"
+        "```c\nint main(void) {\n    return 0;\n}\n```\n\n"
+        "| Feature | Status |\n"
+        "|---------|--------|\n"
+        "| Markdown | ✓ |\n"
+        "| Code | ✓ |\n\n"
+        "---\n"
+    );
+    ai_refresh_output(win);
+
+    gtk_paned_set_start_child(GTK_PANED(ai_paned), GTK_WIDGET(win->ai_webview));
 
     /* Prompt input */
     GtkWidget *prompt_scroll = gtk_scrolled_window_new();

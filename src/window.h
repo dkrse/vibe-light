@@ -4,6 +4,7 @@
 #include <adwaita.h>
 #include <gtksourceview/gtksource.h>
 #include <vte/vte.h>
+#include <webkit/webkit.h>
 #include "settings.h"
 
 typedef struct _VibeWindow VibeWindow;
@@ -28,9 +29,9 @@ struct _VibeWindow {
     VteTerminal          *terminal;
 
     /* Tab 3: AI-model (output view + prompt input) */
-    GtkTextView          *ai_output_view;
-    GtkTextBuffer        *ai_output_buffer;
-    GtkLabel             *ai_status_label;   /* model info */
+    WebKitWebView        *ai_webview;
+    GString              *ai_conversation_md;   /* accumulated raw markdown for re-render */
+    GtkLabel             *ai_status_label;      /* model info */
     GSubprocess          *ai_proc;           /* running claude process */
     GString              *ai_response_buf;   /* accumulates full JSON response */
     char                  ai_session_id[128]; /* session ID for --resume */
@@ -43,6 +44,7 @@ struct _VibeWindow {
     int                   ai_input_tokens;    /* total input tokens this session */
     int                   ai_output_tokens;   /* total output tokens this session */
     gint64                ai_start_time;      /* monotonic µs when prompt was sent */
+    guint                 ai_timer_id;        /* live elapsed time update timer */
     double                ai_last_elapsed;    /* seconds for last request */
     GtkLabel             *ai_token_label;     /* token display in AI tab */
 
@@ -108,5 +110,6 @@ void vibe_window_open_directory(VibeWindow *win, const char *path);
 void vibe_window_set_root_directory(VibeWindow *win, const char *path);
 void vibe_window_disconnect_sftp(VibeWindow *win);
 void vibe_window_toast(VibeWindow *win, const char *message);
+void vibe_window_switch_ai_mode(VibeWindow *win);
 
 #endif

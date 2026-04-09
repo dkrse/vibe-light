@@ -12,6 +12,7 @@ Vibe Light is a lightweight GTK4/libadwaita desktop application written in C17. 
 - **Syntax Highlighting:** GtkSourceView 5 (200+ languages)
 - **Terminal:** VTE (vte-2.91-gtk4)
 - **SSH/SFTP:** System `ssh` command (no libssh)
+- **AI Markdown:** WebKitGTK 6.0 (WebView) + cmark-gfm (Markdown→HTML)
 - **Build System:** Make + GCC
 - **Build Hardening:** `-fstack-protector-strong`, `-fPIE`, `-D_FORTIFY_SOURCE=2`
 
@@ -65,7 +66,7 @@ Central struct holding all UI state:
 - `search_bar` / `search_entry` / `search_ctx` -- Ctrl+F search UI and GtkSourceSearchContext
 - `prompt_intensity_tag` -- GtkTextTag for prompt font intensity
 - `terminal` -- VteTerminal
-- `ai_output_view` / `ai_output_buffer` -- AI response display
+- `ai_webview` -- WebKitWebView for AI response display (HTML markdown rendering)
 - `ai_proc` / `ai_response_buf` -- Claude subprocess and response accumulator
 - `ai_session_id` -- Session ID for `--resume`
 - `ai_input_tokens` / `ai_output_tokens` -- Token usage tracking
@@ -124,7 +125,7 @@ GtkApplicationWindow
           GtkBox (ai_status_bar: model label + token label)
           GtkSeparator
           GtkPaned (vertical)
-            GtkScrolledWindow > GtkTextView (.prompt-view) -- output
+            WebKitWebView -- AI output (HTML markdown)
             GtkScrolledWindow > GtkTextView (.prompt-view) -- input
     GtkBox (.statusbar)
       GtkLabel (file count / SFTP info)
@@ -336,7 +337,8 @@ All operations show toast notifications on success/failure. Remote files are blo
 - Model name extracted from response JSON
 - Configurable tool access: Read, Edit, Write, Glob, Grep, Bash
 - CWD restriction: optional system prompt restricting file access to terminal's CWD
-- **Markdown rendering** via `insert_markdown()` with GtkTextTags: `md-bold`, `md-italic`, `md-code`, `md-codeblock`, `md-heading`, `md-link`
+- **HTML markdown rendering** via WebKitWebView: cmark-gfm parses markdown to HTML, rendered with dark/light CSS matching the app theme. LaTeX expressions (`$...$`, `$$...$$`) converted to Unicode (e.g. `\sum` → `∑`, `^2` → `²`). Hardware acceleration disabled for GPU-less environments.
+- Full support for tables, code blocks, headings, bold, italic, links, blockquotes, lists, strikethrough, horizontal rules
 - **Conversation logging** via `prompt_log.c` -- both input and output entries logged to `.LLM/prompts.json` with model, session, token counts, elapsed time. Input deferred until response arrives so model/session are accurate.
 
 ## Terminal

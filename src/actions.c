@@ -965,6 +965,7 @@ typedef struct {
     GtkCheckButton *chk_full_disk;
     GtkCheckButton *chk_read, *chk_edit, *chk_write;
     GtkCheckButton *chk_glob, *chk_grep, *chk_bash;
+    GtkCheckButton *chk_markdown;
 } AiModelCtx;
 
 static void on_ai_model_apply(GtkButton *btn, gpointer data) {
@@ -977,7 +978,9 @@ static void on_ai_model_apply(GtkButton *btn, gpointer data) {
     ctx->win->settings.ai_tool_glob  = gtk_check_button_get_active(ctx->chk_glob);
     ctx->win->settings.ai_tool_grep  = gtk_check_button_get_active(ctx->chk_grep);
     ctx->win->settings.ai_tool_bash  = gtk_check_button_get_active(ctx->chk_bash);
+    ctx->win->settings.ai_markdown   = gtk_check_button_get_active(ctx->chk_markdown);
     settings_save(&ctx->win->settings);
+    vibe_window_switch_ai_mode(ctx->win);
     gtk_window_close(ctx->dialog);
 }
 
@@ -993,7 +996,8 @@ static void on_ai_new_session(GtkButton *btn, gpointer data) {
     win->ai_last_elapsed = 0.0;
 
     /* Clear output */
-    gtk_text_buffer_set_text(win->ai_output_buffer, "", -1);
+    if (win->ai_conversation_md) g_string_truncate(win->ai_conversation_md, 0);
+    vibe_window_switch_ai_mode(win); /* re-render empty */
     gtk_label_set_text(win->ai_status_label, "ready");
     gtk_label_set_text(win->ai_token_label, "in: 0  out: 0  total: 0");
 
@@ -1099,6 +1103,19 @@ static void on_ai_model_dialog(GSimpleAction *action, GVariant *param, gpointer 
     gtk_grid_attach(GTK_GRID(perm_grid), GTK_WIDGET(ctx->chk_bash), 2, 1, 1, 1);
 
     gtk_box_append(GTK_BOX(vbox), perm_grid);
+
+    /* Output format */
+    gtk_box_append(GTK_BOX(vbox), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+
+    ctx->chk_markdown = GTK_CHECK_BUTTON(
+        gtk_check_button_new_with_label("Render Markdown in output"));
+    gtk_check_button_set_active(ctx->chk_markdown, win->settings.ai_markdown);
+    gtk_box_append(GTK_BOX(vbox), GTK_WIDGET(ctx->chk_markdown));
+
+    GtkWidget *md_hint = gtk_label_new("Off = show raw markdown text");
+    gtk_label_set_xalign(GTK_LABEL(md_hint), 0);
+    gtk_widget_add_css_class(md_hint, "dim-label");
+    gtk_box_append(GTK_BOX(vbox), md_hint);
 
     /* Session info */
     gtk_box_append(GTK_BOX(vbox), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));

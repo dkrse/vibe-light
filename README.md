@@ -10,7 +10,7 @@ A lightweight file browser, terminal, and AI assistant built with GTK4, libadwai
 - **Search** -- Ctrl+F find with highlighting and navigation, Ctrl+G go to line
 - **Live File Watching** -- File browser and editor update automatically when files change on disk
 - **Terminal** -- Embedded VTE terminal, spawned in the opened directory
-- **AI Assistant** -- Send prompts to Claude CLI, view markdown-formatted responses with token tracking
+- **AI Assistant** -- Send prompts to Claude CLI, view responses in WebKitWebView with full HTML markdown rendering, token tracking
 - **SFTP/SSH** -- Browse remote directories and view remote files via SSH, save multiple connection profiles
 - **13 Themes** -- System, Light, Dark, Solarized, Monokai, Gruvbox, Nord, Dracula, Tokyo Night, Catppuccin
 - **Per-section Fonts** -- Independent font settings for GUI, File Browser, Editor, Terminal, and Prompt
@@ -29,25 +29,27 @@ A lightweight file browser, terminal, and AI assistant built with GTK4, libadwai
 - libadwaita (>= 1.0)
 - GtkSourceView 5
 - VTE (vte-2.91-gtk4)
+- WebKitGTK 6.0 (for AI markdown rendering)
+- cmark-gfm (GitHub-Flavored Markdown parser)
 - GCC, Make, pkg-config
 - OpenSSH client (for SFTP, usually pre-installed)
 
 ### Fedora (43+)
 
 ```bash
-sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel gcc make pkgconf-pkg-config
+sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel webkitgtk6.0-devel cmark-gfm-devel gcc make pkgconf-pkg-config
 ```
 
 ### Ubuntu / Debian
 
 ```bash
-sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev gcc make pkg-config
+sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev libwebkitgtk-6.0-dev libcmark-gfm-dev gcc make pkg-config
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S gtk4 libadwaita vte4 gtksourceview5 gcc make pkg-config
+sudo pacman -S gtk4 libadwaita vte4 gtksourceview5 webkit2gtk-5.0 cmark-gfm gcc make pkg-config
 ```
 
 See [docs/dependencies.md](docs/dependencies.md) for full details.
@@ -130,7 +132,9 @@ SSH connections use ControlMaster multiplexing for efficient reuse of a single T
 Built-in integration with Claude CLI (`claude` command):
 
 - Send prompts and view responses in a dedicated tab
-- **Markdown rendering** -- code blocks, bold, italic, inline code, headings, links
+- **Full HTML markdown rendering** -- WebKitWebView with cmark-gfm: tables, code blocks, headings, bold, italic, links, blockquotes, lists, horizontal rules
+- **LaTeX to Unicode** -- math expressions like `$E = mc^2$` rendered as `E = mc²`, `$\sum$` as `∑`
+- **Theme-aware** -- AI output follows app theme (dark/light CSS)
 - Session continuity via `--resume`
 - Token usage tracking (input/output/total)
 - Configurable tool access (Read, Edit, Write, Glob, Grep, Bash)

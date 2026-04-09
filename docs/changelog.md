@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.6.0 (2026-04-09)
+
+### Features
+
+- **WebKitWebView AI output** -- replaced GtkTextView markdown approximation with full HTML rendering via WebKitWebView + cmark-gfm. Proper tables, code blocks, headings, bold, italic, links, blockquotes, lists, strikethrough, horizontal rules.
+- **LaTeX to Unicode** -- math expressions converted to Unicode symbols (e.g. `$\sum_{i=1}^{n}$` → `∑ᵢ₌₁ⁿ`, `$E = mc^2$` → `E = mc²`). Supports Greek letters, operators, arrows, set notation, superscripts, subscripts.
+- **Theme-aware AI output** -- dark and light CSS variants, automatically switches when app theme changes.
+- **GPU-less rendering** -- WebKit hardware acceleration disabled (`WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER`) for environments without GPU access.
+
+### Bug Fixes
+
+- **JSON parser fixes** -- fixed broken closing-quote detection for strings containing `\\"`, added `\uXXXX` Unicode escape support (including UTF-16 surrogate pairs), added missing escape sequences (`\r`, `\b`, `\f`, `\/`).
+- **stderr contamination fix** -- changed subprocess flags from `STDERR_MERGE` to `STDERR_SILENCE` so claude CLI stderr output no longer corrupts JSON response parsing.
+
+### Architecture
+
+- **WebKitGTK 6.0** added as dependency for AI markdown rendering
+- **cmark-gfm** renders markdown to HTML (with table, strikethrough, autolink extensions)
+- Old GtkTextBuffer-based markdown renderer (`ensure_md_tags`, `render_cmark`, `insert_markdown`) removed
+
+### Dependencies
+
+- **Added:** WebKitGTK 6.0 (`webkitgtk-6.0`), cmark-gfm (`libcmark-gfm`)
+
 ## v0.5.0 (2026-04-09)
 
 ### Features

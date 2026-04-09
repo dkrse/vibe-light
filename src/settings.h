@@ -45,6 +45,7 @@ typedef struct {
     gboolean ai_tool_glob;
     gboolean ai_tool_grep;
     gboolean ai_tool_bash;
+    gboolean ai_markdown;       /* TRUE=render markdown, FALSE=raw text */
 
     /* Window */
     int window_width;
