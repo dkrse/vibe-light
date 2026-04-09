@@ -129,6 +129,7 @@ typedef struct { VibeWindow *win; double *field; } IntensityCtx;
 static void on_intensity_changed(GtkRange *range, gpointer data) {
     IntensityCtx *ctx = data;
     *ctx->field = gtk_range_get_value(range);
+    vibe_window_apply_settings(ctx->win);
 }
 
 static void on_line_numbers_toggled(GtkCheckButton *btn, gpointer data) {
@@ -144,6 +145,17 @@ static void on_highlight_line_toggled(GtkCheckButton *btn, gpointer data) {
 static void on_wrap_lines_toggled(GtkCheckButton *btn, gpointer data) {
     VibeWindow *win = data;
     win->settings.wrap_lines = gtk_check_button_get_active(btn);
+}
+
+static void on_gitignored_changed(GtkDropDown *dd, GParamSpec *pspec, gpointer data) {
+    (void)pspec;
+    VibeWindow *win = data;
+    win->settings.show_gitignored = (int)gtk_drop_down_get_selected(dd);
+}
+
+static void on_show_hidden_toggled(GtkCheckButton *btn, gpointer data) {
+    VibeWindow *win = data;
+    win->settings.show_hidden = gtk_check_button_get_active(btn);
 }
 
 static void on_send_key_changed(GtkDropDown *dd, GParamSpec *ps, gpointer data) {
@@ -331,6 +343,21 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
         int row = 0;
 
         make_font_row(grid, &row, "Font:", win->settings.browser_font, &win->settings.browser_font_size, NULL, win, allocs);
+
+        /* Show Hidden Files */
+        gtk_grid_attach(GTK_GRID(grid), make_label("Show Hidden Files:"), 0, row, 1, 1);
+        GtkWidget *hidden_check = gtk_check_button_new();
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(hidden_check), win->settings.show_hidden);
+        g_signal_connect(hidden_check, "toggled", G_CALLBACK(on_show_hidden_toggled), win);
+        gtk_grid_attach(GTK_GRID(grid), hidden_check, 1, row++, 1, 1);
+
+        /* Gitignored Files */
+        gtk_grid_attach(GTK_GRID(grid), make_label("Gitignored Files:"), 0, row, 1, 1);
+        const char *gi_options[] = {"Hide", "Show (gray)", NULL};
+        GtkWidget *gi_dd = gtk_drop_down_new_from_strings(gi_options);
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(gi_dd), (guint)win->settings.show_gitignored);
+        g_signal_connect(gi_dd, "notify::selected", G_CALLBACK(on_gitignored_changed), win);
+        gtk_grid_attach(GTK_GRID(grid), gi_dd, 1, row++, 1, 1);
 
         gtk_notebook_append_page(GTK_NOTEBOOK(nb), grid, gtk_label_new("File Browser"));
     }
@@ -1157,29 +1184,81 @@ static void on_ai_model_dialog(GSimpleAction *action, GVariant *param, gpointer 
     gtk_window_present(GTK_WINDOW(dialog));
 }
 
+/* ── Tab switch + quit actions ── */
+
+static void on_tab_files(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    VibeWindow *win = data;
+    gtk_notebook_set_current_page(win->notebook, 0);
+}
+
+static void on_tab_terminal(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    VibeWindow *win = data;
+    gtk_notebook_set_current_page(win->notebook, 1);
+}
+
+static void on_tab_ai(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    VibeWindow *win = data;
+    gtk_notebook_set_current_page(win->notebook, 2);
+}
+
+static void on_quit(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    VibeWindow *win = data;
+    gtk_window_close(GTK_WINDOW(win->window));
+}
+
 /* ── Setup ── */
 
 static const GActionEntry win_actions[] = {
-    {"open-folder", on_open_folder, NULL, NULL, NULL, {0}},
-    {"settings",    on_settings,    NULL, NULL, NULL, {0}},
-    {"sftp",        on_sftp_dialog, NULL, NULL, NULL, {0}},
-    {"ai-model",    on_ai_model_dialog, NULL, NULL, NULL, {0}},
-    {"zoom-in",     on_zoom_in,     NULL, NULL, NULL, {0}},
-    {"zoom-out",    on_zoom_out,    NULL, NULL, NULL, {0}},
+    {"open-folder",   on_open_folder,     NULL, NULL, NULL, {0}},
+    {"settings",      on_settings,        NULL, NULL, NULL, {0}},
+    {"sftp",          on_sftp_dialog,     NULL, NULL, NULL, {0}},
+    {"ai-model",      on_ai_model_dialog, NULL, NULL, NULL, {0}},
+    {"zoom-in",       on_zoom_in,         NULL, NULL, NULL, {0}},
+    {"zoom-out",      on_zoom_out,        NULL, NULL, NULL, {0}},
+    {"tab-files",     on_tab_files,       NULL, NULL, NULL, {0}},
+    {"tab-terminal",  on_tab_terminal,    NULL, NULL, NULL, {0}},
+    {"tab-ai",        on_tab_ai,          NULL, NULL, NULL, {0}},
+    {"quit",          on_quit,            NULL, NULL, NULL, {0}},
 };
 
+/* Helper: set accel from settings string — supports "KEY1|KEY2" for alternatives */
+static void set_accel(GtkApplication *app, const char *action, const char *accel) {
+    if (!accel[0]) return;
+
+    /* Check for "|" separator (e.g. "<Control>plus|<Control>equal") */
+    char *sep = strchr(accel, '|');
+    if (sep) {
+        char first[64], second[64];
+        size_t flen = (size_t)(sep - accel);
+        if (flen >= sizeof(first)) flen = sizeof(first) - 1;
+        memcpy(first, accel, flen);
+        first[flen] = '\0';
+        g_strlcpy(second, sep + 1, sizeof(second));
+        const char *accels[] = {first, second, NULL};
+        gtk_application_set_accels_for_action(app, action, accels);
+    } else {
+        const char *accels[] = {accel, NULL};
+        gtk_application_set_accels_for_action(app, action, accels);
+    }
+}
+
 void actions_setup(VibeWindow *win, GtkApplication *app) {
-    (void)app;
     g_action_map_add_action_entries(
         G_ACTION_MAP(win->window),
         win_actions,
         G_N_ELEMENTS(win_actions),
         win);
 
-    const char *open_accels[] = {"<Control>o", NULL};
-    const char *zoomin_accels[] = {"<Control>plus", "<Control>equal", NULL};
-    const char *zoomout_accels[] = {"<Control>minus", NULL};
-    gtk_application_set_accels_for_action(app, "win.open-folder", open_accels);
-    gtk_application_set_accels_for_action(app, "win.zoom-in", zoomin_accels);
-    gtk_application_set_accels_for_action(app, "win.zoom-out", zoomout_accels);
+    VibeSettings *s = &win->settings;
+    set_accel(app, "win.open-folder",  s->key_open_folder);
+    set_accel(app, "win.zoom-in",      s->key_zoom_in);
+    set_accel(app, "win.zoom-out",     s->key_zoom_out);
+    set_accel(app, "win.tab-files",    s->key_tab_files);
+    set_accel(app, "win.tab-terminal", s->key_tab_terminal);
+    set_accel(app, "win.tab-ai",       s->key_tab_ai);
+    set_accel(app, "win.quit",         s->key_quit);
 }

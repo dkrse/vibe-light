@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.4.0 (2026-04-09)
+
+### Features
+
+- **Syntax highlighting** -- GtkSourceView 5 integration with 200+ language support (C, Python, Rust, Go, Makefile, JSON, YAML, assembly, and more). Language auto-detected from filename and content type.
+- **Git status indicators** -- file browser shows colored labels for modified (orange), staged (green), untracked (gray), deleted (red), conflict (bright red), and ignored (dark gray) files. Works locally and over SSH/SFTP.
+- **Gitignored file handling** -- configurable in Settings > File Browser: hide (default) or show in gray. Detects both `!! file` entries and directories where all children are ignored.
+- **Show/hide hidden files** -- toggle dotfile visibility in Settings > File Browser. Works locally and over SSH.
+- **Lazy loading** -- directories with >500 entries show first batch + "Show N more..." row. Prevents UI freeze on large directories.
+- **Async file loading** -- files load in GTask background threads with "Loading..." indicator. UI never blocks, guard checks prevent stale loads.
+- **Configurable keyboard shortcuts** -- 7 shortcuts configurable via `settings.conf`: open folder, zoom in/out, tab switching (Alt+1/2/3), quit. Supports `|` separator for alternative keys.
+- **Session restore** -- saves and restores last open file, cursor position (line + column), and active tab across sessions. Only restores local files.
+- **Tab switching shortcuts** -- Alt+1 (Files), Alt+2 (Terminal), Alt+3 (AI) actions with configurable keybindings.
+- **Quit action** -- Ctrl+Q closes the window (configurable).
+- **Live intensity preview** -- font intensity slider updates editor/UI in real-time while dragging.
+
+### Architecture
+
+- **SSH module extracted** -- `ssh.c` / `ssh.h` contain all SSH transport functions: argv builders, ControlMaster lifecycle, spawn_sync, cat_file, poll threads. Decoupled from window.c.
+- **GtkSourceView replaces custom code** -- removed ~130 lines of custom line numbers (update_line_numbers, Pango measurement, synced scroll), custom VibeTextView subclass (snapshot override for line highlight), and related widget hierarchy. All handled natively by GtkSourceView.
+- **Font intensity via CSS opacity** -- editor uses CSS `opacity` on `.file-viewer` widget instead of GtkTextTag (preserves syntax highlighting colors).
+- **Content type detection** -- `g_content_type_guess()` enables language detection for extensionless files (Makefile, Dockerfile, etc.).
+
+### Security
+
+- **Build hardening flags** -- `-fstack-protector-strong`, `-fPIE`/`-pie`, `-D_FORTIFY_SOURCE=2`
+- **Stack buffer replaced** -- 16KB CSS stack buffer replaced with heap allocation (`g_strconcat`)
+
+### Dependencies
+
+- **Added:** GtkSourceView 5 (`gtksourceview-5`)
+
 ## v0.3.0 (2026-04-05)
 
 ### Features

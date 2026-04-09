@@ -9,6 +9,7 @@
 | pkg-config | Library discovery | any |
 | GTK 4 (dev) | UI framework | 4.0 |
 | libadwaita (dev) | GNOME styling, AdwApplication | 1.0 |
+| GtkSourceView 5 (dev) | Syntax highlighting, line numbers | 5.0 |
 | VTE (dev) | Terminal emulation (gtk4 variant) | 2.91 |
 
 ## Runtime Dependencies
@@ -17,9 +18,11 @@
 |---------|---------|----------|
 | GTK 4 | UI rendering | yes |
 | libadwaita | Theme management | yes |
+| GtkSourceView 5 | Syntax highlighting (200+ languages) | yes |
 | VTE | Embedded terminal | yes |
 | GLib / GIO | Subprocess, file I/O, GTask | yes (bundled with GTK) |
 | OpenSSH client (`ssh`) | SFTP/SSH file browsing and terminal | for SFTP only |
+| git | Git status indicators in file browser | optional |
 | inotify-tools (`inotifywait`) | Instant remote file change detection | optional (on remote server) |
 
 ## Installation
@@ -27,7 +30,7 @@
 ### Fedora (43+)
 
 ```bash
-sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gcc make pkgconf-pkg-config
+sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel gcc make pkgconf-pkg-config
 ```
 
 For SFTP support (usually pre-installed):
@@ -39,14 +42,22 @@ sudo dnf install openssh-clients
 ### Ubuntu / Debian
 
 ```bash
-sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev gcc make pkg-config
+sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev gcc make pkg-config
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S gtk4 libadwaita vte4 gcc make pkg-config
+sudo pacman -S gtk4 libadwaita vte4 gtksourceview5 gcc make pkg-config
 ```
+
+## Build Hardening
+
+The Makefile includes security hardening flags:
+
+- `-fstack-protector-strong` -- stack buffer overflow protection
+- `-fPIE` / `-pie` -- position independent executable (ASLR)
+- `-D_FORTIFY_SOURCE=2` -- runtime bounds checking for string/memory functions
 
 ## Notes
 
@@ -55,4 +66,6 @@ sudo pacman -S gtk4 libadwaita vte4 gcc make pkg-config
 - SSH ControlMaster multiplexing is used to reuse a single TCP connection for all SSH operations.
 - If `inotifywait` (inotify-tools) is installed on the remote server, file change detection is instant. Otherwise falls back to periodic polling (2s interval).
 - Local file watching uses kernel inotify via GLib's `GFileMonitor` (zero CPU when idle).
+- Git status detection uses the system `git` command. If git is not installed or the directory is not a git repo, status indicators are simply not shown.
+- GtkSourceView language detection uses `g_content_type_guess()` for files without extensions (Makefile, Dockerfile, etc.).
 - Configuration files are stored in `~/.config/vibe-light/` with `0600` permissions.

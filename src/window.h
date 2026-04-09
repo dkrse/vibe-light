@@ -2,25 +2,21 @@
 #define WINDOW_H
 
 #include <gtk/gtk.h>
+#include <gtksourceview/gtksource.h>
 #include <vte/vte.h>
 #include "settings.h"
 
-typedef struct {
+typedef struct _VibeWindow VibeWindow;
+struct _VibeWindow {
     GtkApplicationWindow *window;
     GtkNotebook          *notebook;
 
     /* Tab 1: File Browser (left) + File Viewer (right) */
     GtkListBox           *file_list;
     GtkLabel             *path_label;
-    GtkTextView          *file_view;
-    GtkTextBuffer        *file_buffer;
-    GtkTextTag           *intensity_tag;
-    GtkTextView          *line_numbers;
-    GtkWidget            *ln_scrolled;
-    int                   highlight_line;
-    int                   cached_line_count;
+    GtkSourceView        *file_view;
+    GtkSourceBuffer      *file_buffer;
     guint                 intensity_idle_id;
-    GdkRGBA               highlight_rgba;
     char                  current_dir[2048];
     char                  root_dir[2048];
 
@@ -89,9 +85,14 @@ typedef struct {
     GtkButton            *sftp_disconnect_btn;
     GtkLabel             *cursor_label;
 
+    /* Git status */
+    GHashTable           *git_status;       /* rel_path -> GINT status char */
+    char                  git_root[4096];   /* absolute git root path */
+    gboolean              git_status_in_flight;
+
     VibeSettings          settings;
     GtkCssProvider       *css_provider;
-} VibeWindow;
+};
 
 VibeWindow *vibe_window_new(GtkApplication *app);
 void vibe_window_apply_settings(VibeWindow *win);

@@ -55,6 +55,8 @@ void settings_load(VibeSettings *s) {
     s->show_line_numbers = FALSE;
     s->highlight_current_line = TRUE;
     s->wrap_lines = TRUE;
+    s->show_gitignored = 0; /* 0=hide, 1=show gray */
+    s->show_hidden = FALSE;
 
     g_strlcpy(s->terminal_font, "Monospace", sizeof(s->terminal_font));
     s->terminal_font_size = 14;
@@ -75,6 +77,21 @@ void settings_load(VibeSettings *s) {
     s->window_width = 900;
     s->window_height = 600;
     s->last_directory[0] = '\0';
+
+    /* Session restore */
+    s->last_file[0] = '\0';
+    s->last_cursor_line = 0;
+    s->last_cursor_col = 0;
+    s->last_tab = 0;
+
+    /* Keybindings defaults */
+    g_strlcpy(s->key_open_folder, "<Control>o", sizeof(s->key_open_folder));
+    g_strlcpy(s->key_zoom_in, "<Control>plus", sizeof(s->key_zoom_in));
+    g_strlcpy(s->key_zoom_out, "<Control>minus", sizeof(s->key_zoom_out));
+    g_strlcpy(s->key_tab_files, "<Alt>1", sizeof(s->key_tab_files));
+    g_strlcpy(s->key_tab_terminal, "<Alt>2", sizeof(s->key_tab_terminal));
+    g_strlcpy(s->key_tab_ai, "<Alt>3", sizeof(s->key_tab_ai));
+    g_strlcpy(s->key_quit, "<Control>q", sizeof(s->key_quit));
 
     FILE *f = fopen(settings_get_config_path(), "r");
     if (!f) return;
@@ -103,6 +120,8 @@ void settings_load(VibeSettings *s) {
         else if (strcmp(key, "show_line_numbers") == 0) s->show_line_numbers = atoi(val);
         else if (strcmp(key, "highlight_current_line") == 0) s->highlight_current_line = atoi(val);
         else if (strcmp(key, "wrap_lines") == 0) s->wrap_lines = atoi(val);
+        else if (strcmp(key, "show_gitignored") == 0) s->show_gitignored = atoi(val);
+        else if (strcmp(key, "show_hidden") == 0) s->show_hidden = atoi(val);
 
         else if (strcmp(key, "terminal_font") == 0) g_strlcpy(s->terminal_font, val, sizeof(s->terminal_font));
         else if (strcmp(key, "terminal_font_size") == 0) s->terminal_font_size = atoi(val);
@@ -124,6 +143,21 @@ void settings_load(VibeSettings *s) {
         else if (strcmp(key, "window_width") == 0) s->window_width = atoi(val);
         else if (strcmp(key, "window_height") == 0) s->window_height = atoi(val);
         else if (strcmp(key, "last_directory") == 0) g_strlcpy(s->last_directory, val, sizeof(s->last_directory));
+
+        /* session restore */
+        else if (strcmp(key, "last_file") == 0) g_strlcpy(s->last_file, val, sizeof(s->last_file));
+        else if (strcmp(key, "last_cursor_line") == 0) s->last_cursor_line = atoi(val);
+        else if (strcmp(key, "last_cursor_col") == 0) s->last_cursor_col = atoi(val);
+        else if (strcmp(key, "last_tab") == 0) s->last_tab = atoi(val);
+
+        /* keybindings */
+        else if (strcmp(key, "key_open_folder") == 0) g_strlcpy(s->key_open_folder, val, sizeof(s->key_open_folder));
+        else if (strcmp(key, "key_zoom_in") == 0) g_strlcpy(s->key_zoom_in, val, sizeof(s->key_zoom_in));
+        else if (strcmp(key, "key_zoom_out") == 0) g_strlcpy(s->key_zoom_out, val, sizeof(s->key_zoom_out));
+        else if (strcmp(key, "key_tab_files") == 0) g_strlcpy(s->key_tab_files, val, sizeof(s->key_tab_files));
+        else if (strcmp(key, "key_tab_terminal") == 0) g_strlcpy(s->key_tab_terminal, val, sizeof(s->key_tab_terminal));
+        else if (strcmp(key, "key_tab_ai") == 0) g_strlcpy(s->key_tab_ai, val, sizeof(s->key_tab_ai));
+        else if (strcmp(key, "key_quit") == 0) g_strlcpy(s->key_quit, val, sizeof(s->key_quit));
 
         /* backwards compat */
         else if (strcmp(key, "gui_font_intensity") == 0 ||
@@ -257,6 +291,8 @@ void settings_save(const VibeSettings *s) {
     fprintf(f, "show_line_numbers=%d\n", s->show_line_numbers);
     fprintf(f, "highlight_current_line=%d\n", s->highlight_current_line);
     fprintf(f, "wrap_lines=%d\n", s->wrap_lines);
+    fprintf(f, "show_gitignored=%d\n", s->show_gitignored);
+    fprintf(f, "show_hidden=%d\n", s->show_hidden);
 
     fprintf(f, "terminal_font=%s\n", s->terminal_font);
     fprintf(f, "terminal_font_size=%d\n", s->terminal_font_size);
@@ -278,6 +314,21 @@ void settings_save(const VibeSettings *s) {
     fprintf(f, "window_width=%d\n", s->window_width);
     fprintf(f, "window_height=%d\n", s->window_height);
     fprintf(f, "last_directory=%s\n", s->last_directory);
+
+    /* session restore */
+    fprintf(f, "last_file=%s\n", s->last_file);
+    fprintf(f, "last_cursor_line=%d\n", s->last_cursor_line);
+    fprintf(f, "last_cursor_col=%d\n", s->last_cursor_col);
+    fprintf(f, "last_tab=%d\n", s->last_tab);
+
+    /* keybindings */
+    fprintf(f, "key_open_folder=%s\n", s->key_open_folder);
+    fprintf(f, "key_zoom_in=%s\n", s->key_zoom_in);
+    fprintf(f, "key_zoom_out=%s\n", s->key_zoom_out);
+    fprintf(f, "key_tab_files=%s\n", s->key_tab_files);
+    fprintf(f, "key_tab_terminal=%s\n", s->key_tab_terminal);
+    fprintf(f, "key_tab_ai=%s\n", s->key_tab_ai);
+    fprintf(f, "key_quit=%s\n", s->key_quit);
 
     setlocale(LC_NUMERIC, saved_locale);
     fclose(f);

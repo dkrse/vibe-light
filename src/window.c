@@ -2,6 +2,7 @@
 #include <adwaita.h>
 #include "window.h"
 #include "actions.h"
+#include "ssh.h"
 #include <string.h>
 #include <strings.h>
 #include <dirent.h>
@@ -42,9 +43,10 @@ static void build_theme_css(char *buf, size_t bufsize, const char *fg, const cha
         "window,window.background{background-color:%s;color:%s}"
         "box{background-color:%s;color:%s}"
         "scrolledwindow{background-color:%s}"
-        /* textview */
+        /* textview — exclude .file-viewer from color to preserve syntax highlighting */
         "textview{background-color:%s}"
-        "textview text{background-color:%s;color:%s}"
+        "textview:not(.file-viewer) text{background-color:%s;color:%s}"
+        ".file-viewer text{background-color:%s}"
         /* headerbar */
         ".titlebar,headerbar{background:%s;color:%s;box-shadow:none}"
         "headerbar button,headerbar menubutton button,headerbar menubutton"
@@ -83,7 +85,8 @@ static void build_theme_css(char *buf, size_t bufsize, const char *fg, const cha
         bg, fg,      /* box */
         bg,          /* scrolledwindow */
         bg,          /* textview */
-        bg, fg,      /* textview text */
+        bg, fg,      /* textview:not(.file-viewer) text */
+        bg,          /* .file-viewer text bg */
         bg, fg,      /* headerbar */
         fg,          /* headerbar buttons */
         fg,          /* headerbar hover */
@@ -134,7 +137,6 @@ static void apply_theme(VibeWindow *win) {
 }
 
 static gboolean is_dark_theme(const char *theme);
-static void update_highlight(VibeWindow *win);
 
 static void apply_terminal_colors(VibeWindow *win) {
     const char *fg_hex = NULL, *bg_hex = NULL;
@@ -165,46 +167,7 @@ static void apply_terminal_colors(VibeWindow *win) {
     vte_terminal_set_color_cursor_foreground(win->terminal, &bg);
 }
 
-/* ── Line numbers (ported from notes-desktop) ── */
-
-static void update_line_numbers(VibeWindow *win) {
-    int lines = gtk_text_buffer_get_line_count(win->file_buffer);
-    if (lines == win->cached_line_count) return;
-    win->cached_line_count = lines;
-
-    GString *str = g_string_sized_new((gsize)(lines * 4));
-    for (int i = 1; i <= lines; i++) {
-        if (i > 1) g_string_append_c(str, '\n');
-        g_string_append_printf(str, "%d", i);
-    }
-    GtkTextBuffer *ln_buf = gtk_text_view_get_buffer(win->line_numbers);
-    gtk_text_buffer_set_text(ln_buf, str->str, -1);
-    g_string_free(str, TRUE);
-
-    /* measure width needed */
-    int digits = 1, n = lines;
-    while (n >= 10) { digits++; n /= 10; }
-    if (digits < 2) digits = 2;
-
-    char sample[16];
-    memset(sample, '9', (size_t)digits);
-    sample[digits] = '\0';
-
-    PangoLayout *layout = gtk_widget_create_pango_layout(GTK_WIDGET(win->line_numbers), sample);
-    PangoFontDescription *fd = pango_font_description_new();
-    pango_font_description_set_family(fd, win->settings.editor_font);
-    pango_font_description_set_size(fd, win->settings.editor_font_size * PANGO_SCALE);
-    pango_layout_set_font_description(layout, fd);
-    int pw, ph;
-    pango_layout_get_pixel_size(layout, &pw, &ph);
-    (void)ph;
-    pango_font_description_free(fd);
-    g_object_unref(layout);
-
-    gtk_widget_set_size_request(GTK_WIDGET(win->line_numbers), pw + 12, -1);
-}
-
-/* ── Font intensity via GtkTextTag (ported from notes-desktop) ── */
+/* ── Font intensity via GtkTextTag ── */
 
 static gboolean is_dark_theme(const char *theme) {
     return strcmp(theme, "dark") == 0 ||
@@ -219,41 +182,34 @@ static gboolean is_dark_theme(const char *theme) {
 
 static void apply_font_intensity(VibeWindow *win) {
     double alpha = win->settings.font_intensity;
-    GtkTextIter start, end;
-    gtk_text_buffer_get_bounds(win->file_buffer, &start, &end);
 
-    if (alpha >= 0.99) {
-        gtk_text_buffer_remove_tag(win->file_buffer, win->intensity_tag, &start, &end);
-        return;
-    }
+    /* For the source view (file viewer), use CSS opacity to preserve syntax colors */
+    /* The opacity is applied via the font_css in vibe_window_apply_settings */
 
-    const char *fg = NULL;
-    for (size_t i = 0; i < N_CUSTOM_THEMES; i++) {
-        if (strcmp(win->settings.theme, custom_themes[i].id) == 0) {
-            fg = custom_themes[i].fg;
-            break;
-        }
-    }
-
-    GdkRGBA color;
-    if (fg) {
-        gdk_rgba_parse(&color, fg);
-    } else if (is_dark_theme(win->settings.theme)) {
-        color = (GdkRGBA){1.0, 1.0, 1.0, 1.0};
-    } else {
-        color = (GdkRGBA){0.0, 0.0, 0.0, 1.0};
-    }
-    color.alpha = alpha;
-
-    g_object_set(win->intensity_tag, "foreground-rgba", &color, NULL);
-    gtk_text_buffer_apply_tag(win->file_buffer, win->intensity_tag, &start, &end);
-
-    /* same for prompt buffer */
+    /* For the prompt buffer, use a text tag (no syntax highlighting there) */
     GtkTextIter ps, pe;
     gtk_text_buffer_get_bounds(win->prompt_buffer, &ps, &pe);
     if (alpha >= 0.99) {
         gtk_text_buffer_remove_tag(win->prompt_buffer, win->prompt_intensity_tag, &ps, &pe);
     } else {
+        const char *fg = NULL;
+        for (size_t i = 0; i < N_CUSTOM_THEMES; i++) {
+            if (strcmp(win->settings.theme, custom_themes[i].id) == 0) {
+                fg = custom_themes[i].fg;
+                break;
+            }
+        }
+
+        GdkRGBA color;
+        if (fg) {
+            gdk_rgba_parse(&color, fg);
+        } else if (is_dark_theme(win->settings.theme)) {
+            color = (GdkRGBA){1.0, 1.0, 1.0, 1.0};
+        } else {
+            color = (GdkRGBA){0.0, 0.0, 0.0, 1.0};
+        }
+        color.alpha = alpha;
+
         g_object_set(win->prompt_intensity_tag, "foreground-rgba", &color, NULL);
         gtk_text_buffer_apply_tag(win->prompt_buffer, win->prompt_intensity_tag, &ps, &pe);
     }
@@ -262,6 +218,7 @@ static void apply_font_intensity(VibeWindow *win) {
 static gboolean intensity_idle_cb(gpointer data) {
     VibeWindow *win = data;
     win->intensity_idle_id = 0;
+    /* Only prompt needs per-buffer tag intensity; file viewer uses CSS opacity */
     if (win->settings.font_intensity < 0.99)
         apply_font_intensity(win);
     return G_SOURCE_REMOVE;
@@ -272,15 +229,12 @@ static void update_status_bar(VibeWindow *win);
 static void on_cursor_moved(GtkTextBuffer *buffer, GParamSpec *pspec, gpointer data) {
     (void)buffer; (void)pspec;
     VibeWindow *win = data;
-    update_highlight(win);
     update_status_bar(win);
 }
 
 static void on_file_buffer_changed(GtkTextBuffer *buffer, gpointer data) {
     (void)buffer;
     VibeWindow *win = data;
-    if (win->settings.show_line_numbers)
-        update_line_numbers(win);
     if (win->settings.font_intensity < 0.99 && win->intensity_idle_id == 0)
         win->intensity_idle_id = g_idle_add(intensity_idle_cb, win);
 }
@@ -295,65 +249,7 @@ static void on_prompt_buffer_changed(GtkTextBuffer *buffer, gpointer data) {
     }
 }
 
-/* ── Highlight current line (ported from notes-desktop) ── */
-
-#define VIBE_TYPE_TEXT_VIEW (vibe_text_view_get_type())
-G_DECLARE_FINAL_TYPE(VibeTextView, vibe_text_view, VIBE, TEXT_VIEW, GtkTextView)
-
-struct _VibeTextView {
-    GtkTextView parent;
-    VibeWindow *win;
-};
-
-G_DEFINE_TYPE(VibeTextView, vibe_text_view, GTK_TYPE_TEXT_VIEW)
-
-static void vibe_text_view_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
-    VibeTextView *self = VIBE_TEXT_VIEW(widget);
-    VibeWindow *win = self->win;
-
-    GTK_WIDGET_CLASS(vibe_text_view_parent_class)->snapshot(widget, snapshot);
-
-    if (win && win->settings.highlight_current_line) {
-        GtkTextIter iter;
-        gtk_text_buffer_get_iter_at_line(win->file_buffer, &iter, win->highlight_line);
-
-        GdkRectangle rect;
-        gtk_text_view_get_iter_location(GTK_TEXT_VIEW(widget), &iter, &rect);
-
-        int wx, wy;
-        gtk_text_view_buffer_to_window_coords(GTK_TEXT_VIEW(widget),
-            GTK_TEXT_WINDOW_WIDGET, rect.x, rect.y, &wx, &wy);
-
-        int view_width = gtk_widget_get_width(widget);
-        int h = rect.height > 0 ? rect.height : win->settings.editor_font_size + 4;
-        int extra = (int)((win->settings.line_spacing - 1.0) * win->settings.editor_font_size * 0.5);
-        if (extra < 0) extra = 0;
-
-        graphene_rect_t area = GRAPHENE_RECT_INIT(0, wy - extra, view_width, h + extra * 2);
-        gtk_snapshot_append_color(snapshot, &win->highlight_rgba, &area);
-    }
-}
-
-static void vibe_text_view_class_init(VibeTextViewClass *klass) {
-    GTK_WIDGET_CLASS(klass)->snapshot = vibe_text_view_snapshot;
-}
-
-static void vibe_text_view_init(VibeTextView *self) { (void)self; }
-
-static void update_highlight(VibeWindow *win) {
-    GtkTextMark *mark = gtk_text_buffer_get_insert(win->file_buffer);
-    GtkTextIter cursor;
-    gtk_text_buffer_get_iter_at_mark(win->file_buffer, &cursor, mark);
-    win->highlight_line = gtk_text_iter_get_line(&cursor);
-    gtk_widget_queue_draw(GTK_WIDGET(win->file_view));
-}
-
-static void apply_highlight_color(VibeWindow *win) {
-    if (is_dark_theme(win->settings.theme))
-        win->highlight_rgba = (GdkRGBA){1.0, 1.0, 1.0, 0.06};
-    else
-        win->highlight_rgba = (GdkRGBA){0.0, 0.0, 0.0, 0.06};
-}
+/* Current line highlighting and line numbers are handled by GtkSourceView */
 
 /* ── Apply all settings ── */
 
@@ -368,28 +264,30 @@ void vibe_window_apply_settings(VibeWindow *win) {
     pango_font_description_free(fd);
 
     /* wrap mode (editor only) */
-    gtk_text_view_set_wrap_mode(win->file_view,
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(win->file_view),
         win->settings.wrap_lines ? GTK_WRAP_WORD_CHAR : GTK_WRAP_NONE);
 
     /* line spacing */
     int extra = (int)((win->settings.line_spacing - 1.0) * win->settings.editor_font_size * 0.5);
     if (extra < 0) extra = 0;
-    gtk_text_view_set_pixels_above_lines(win->file_view, extra);
-    gtk_text_view_set_pixels_below_lines(win->file_view, extra);
+    gtk_text_view_set_pixels_above_lines(GTK_TEXT_VIEW(win->file_view), extra);
+    gtk_text_view_set_pixels_below_lines(GTK_TEXT_VIEW(win->file_view), extra);
     gtk_text_view_set_pixels_above_lines(win->prompt_view, extra);
     gtk_text_view_set_pixels_below_lines(win->prompt_view, extra);
-    gtk_text_view_set_pixels_above_lines(win->line_numbers, extra);
-    gtk_text_view_set_pixels_below_lines(win->line_numbers, extra);
 
-    /* line numbers visibility */
-    gtk_widget_set_visible(win->ln_scrolled, win->settings.show_line_numbers);
-    win->cached_line_count = 0;
-    if (win->settings.show_line_numbers)
-        update_line_numbers(win);
+    /* GtkSourceView: line numbers + current line highlight + style scheme */
+    gtk_source_view_set_show_line_numbers(win->file_view, win->settings.show_line_numbers);
+    gtk_source_view_set_highlight_current_line(win->file_view, win->settings.highlight_current_line);
 
-    /* highlight */
-    apply_highlight_color(win);
-    update_highlight(win);
+    /* Update source style scheme to match theme */
+    GtkSourceStyleSchemeManager *ssm = gtk_source_style_scheme_manager_get_default();
+    GtkSourceStyleScheme *scheme = NULL;
+    if (is_dark_theme(win->settings.theme))
+        scheme = gtk_source_style_scheme_manager_get_scheme(ssm, "Adwaita-dark");
+    else
+        scheme = gtk_source_style_scheme_manager_get_scheme(ssm, "Adwaita");
+    if (scheme)
+        gtk_source_buffer_set_style_scheme(win->file_buffer, scheme);
 
     /* font intensity (editor) */
     apply_font_intensity(win);
@@ -430,10 +328,15 @@ void vibe_window_apply_settings(VibeWindow *win) {
     int b = (int)(fg_rgba.blue * 255);
     int a_full = (int)(alpha * 100);
     int a_dim = (int)(alpha * 30);
-    char fg_full[64], fg_dim[64];
+    char fg_full[64], fg_dim[64], opacity_str[16];
     /* use integer math to avoid locale comma in decimals */
     snprintf(fg_full, sizeof(fg_full), "rgba(%d,%d,%d,0.%02d)", r, g, b, a_full);
     snprintf(fg_dim, sizeof(fg_dim), "rgba(%d,%d,%d,0.%02d)", r, g, b, a_dim);
+    /* opacity for file viewer text (locale-safe) */
+    if (alpha >= 0.99)
+        snprintf(opacity_str, sizeof(opacity_str), "1");
+    else
+        snprintf(opacity_str, sizeof(opacity_str), "0.%02d", a_full);
 
     char font_css[8192];
     snprintf(font_css, sizeof(font_css),
@@ -447,7 +350,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
              ".path-bar{font-family:%s;font-size:%dpt}"
              ".statusbar label{font-family:%s;font-size:%dpt}"
              /* per-section fonts */
-             ".file-viewer{font-family:%s;font-size:%dpt;font-weight:%d;caret-color:%s}"
+             ".file-viewer{font-family:%s;font-size:%dpt;font-weight:%d;caret-color:%s;opacity:%s}"
              ".file-browser{font-family:%s;font-size:%dpt}"
              ".file-browser label{color:%s}"
              ".prompt-view{font-family:%s;font-size:%dpt;caret-color:%s}"
@@ -460,8 +363,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
              "popover modelbutton{color:%s}"
              "popover>contents,popover.menu>contents{color:%s}"
              "window label{color:%s}"
-             "window checkbutton label{color:%s}"
-             ".line-numbers,.line-numbers text{font-family:%s;font-size:%dpt;font-weight:%d;color:%s}",
+             "window checkbutton label{color:%s}",
              /* GUI font args */
              win->settings.gui_font, win->settings.gui_font_size,
              win->settings.gui_font, win->settings.gui_font_size,
@@ -472,6 +374,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
              win->settings.gui_font, win->settings.gui_font_size,
              /* per-section font args */
              win->settings.editor_font, win->settings.editor_font_size, win->settings.editor_font_weight, fg_full,
+             opacity_str, /* .file-viewer text opacity */
              win->settings.browser_font, win->settings.browser_font_size,
              fg_full,
              win->settings.prompt_font, win->settings.prompt_font_size, fg_full,
@@ -484,13 +387,11 @@ void vibe_window_apply_settings(VibeWindow *win) {
              fg_full,
              fg_full,
              fg_full,
-             fg_full,
-             win->settings.editor_font, win->settings.editor_font_size,
-             win->settings.editor_font_weight, fg_dim);
+             fg_full);
 
-    char full_css[16384];
-    snprintf(full_css, sizeof(full_css), "%s%s", theme_css, font_css);
+    char *full_css = g_strconcat(theme_css, font_css, NULL);
     gtk_css_provider_load_from_string(win->css_provider, full_css);
+    g_free(full_css);
 
     /* status bar */
     update_status_bar(win);
@@ -527,13 +428,411 @@ static int entry_compare(const void *a, const void *b) {
 static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data);
 static void update_file_status(VibeWindow *win);
 
-/* Create a label row for the tree browser.
-   depth = indentation level, is_dir = directory flag,
-   full_path = absolute path to file/dir, name = display name */
-static gboolean path_is_remote(const char *path) {
-    return (strstr(path, "/vibe-light-sftp-") != NULL ||
-            strstr(path, "/vibe-sftp-") != NULL);
+/* Use ssh_path_is_remote() from ssh.h — alias for readability */
+#define path_is_remote(p) ssh_path_is_remote(p)
+
+/* ── Git status ── */
+
+/* Status characters: M=modified, A=staged, ?=untracked, D=deleted, U=conflict, I=ignored */
+/* Colors for Pango markup */
+#define GIT_COLOR_MODIFIED  "#e8a838"
+#define GIT_COLOR_STAGED    "#73c991"
+#define GIT_COLOR_UNTRACKED "#888888"
+#define GIT_COLOR_DELETED   "#f14c4c"
+#define GIT_COLOR_CONFLICT  "#e51400"
+#define GIT_COLOR_IGNORED   "#555555"
+
+static const char *git_status_color(int status) {
+    switch (status) {
+        case 'M': return GIT_COLOR_MODIFIED;
+        case 'A': return GIT_COLOR_STAGED;
+        case '?': return GIT_COLOR_UNTRACKED;
+        case 'D': return GIT_COLOR_DELETED;
+        case 'U': return GIT_COLOR_CONFLICT;
+        case 'I': return GIT_COLOR_IGNORED;
+        default:  return NULL;
+    }
 }
+
+/* Compute relative path from git root. Returns static/stack buffer — caller must use immediately. */
+static const char *git_rel_path(VibeWindow *win, const char *full_path,
+                                 char *buf, size_t buflen) {
+    if (path_is_remote(full_path)) {
+        char remote[4096];
+        ssh_to_remote_path(win->ssh_mount, win->ssh_remote_path,
+                           full_path, remote, sizeof(remote));
+        size_t root_len = strlen(win->git_root);
+        if (strncmp(remote, win->git_root, root_len) == 0) {
+            const char *r = remote + root_len;
+            if (r[0] == '/') r++;
+            g_strlcpy(buf, r, buflen);
+            return buf;
+        }
+    } else {
+        size_t root_len = strlen(win->git_root);
+        if (strncmp(full_path, win->git_root, root_len) == 0) {
+            const char *r = full_path + root_len;
+            if (r[0] == '/') r++;
+            return r; /* points into full_path — stable */
+        }
+    }
+    return NULL;
+}
+
+/* Check if a path or any of its parent dirs is ignored.
+   Checks both "dir/" entries and individual file entries. */
+static gboolean is_path_ignored(VibeWindow *win, const char *rel) {
+    if (!rel || !win->git_status) return FALSE;
+
+    /* Direct lookup: exact file "path" */
+    gpointer val = g_hash_table_lookup(win->git_status, rel);
+    if (val && GPOINTER_TO_INT(val) == 'I') return TRUE;
+
+    /* Check if any parent dir is ignored: "dir/" entries */
+    char parent[4096];
+    g_strlcpy(parent, rel, sizeof(parent));
+    for (;;) {
+        char *slash = strrchr(parent, '/');
+        if (!slash) break;
+        slash[1] = '\0'; /* keep trailing slash: "dir/" */
+        val = g_hash_table_lookup(win->git_status, parent);
+        if (val && GPOINTER_TO_INT(val) == 'I') return TRUE;
+        slash[0] = '\0'; /* remove slash for next iteration */
+    }
+    return FALSE;
+}
+
+/* Check if a directory contains only ignored entries (all children are 'I') */
+static gboolean is_dir_all_ignored(VibeWindow *win, const char *prefix) {
+    if (!win->git_status) return FALSE;
+    size_t plen = strlen(prefix);
+    gboolean found_any = FALSE;
+
+    GHashTableIter iter;
+    gpointer key, val;
+    g_hash_table_iter_init(&iter, win->git_status);
+    while (g_hash_table_iter_next(&iter, &key, &val)) {
+        const char *k = key;
+        if (strncmp(k, prefix, plen) == 0 && k[plen] == '/') {
+            found_any = TRUE;
+            if (GPOINTER_TO_INT(val) != 'I') return FALSE;
+        }
+    }
+    return found_any; /* TRUE only if all children are ignored */
+}
+
+/* Look up git status for a file. Returns 0 if no status (clean). */
+static int git_status_for_path(VibeWindow *win, const char *full_path) {
+    if (!win->git_status || !win->git_root[0]) return 0;
+
+    char buf[4096];
+    const char *rel = git_rel_path(win, full_path, buf, sizeof(buf));
+    if (!rel || !rel[0]) return 0;
+
+    /* Check ignored (including parent dirs) */
+    if (is_path_ignored(win, rel)) return 'I';
+
+    gpointer val = g_hash_table_lookup(win->git_status, rel);
+    return val ? GPOINTER_TO_INT(val) : 0;
+}
+
+/* Check if any file under a directory path has a git status */
+static int git_status_for_dir(VibeWindow *win, const char *full_path) {
+    if (!win->git_status || !win->git_root[0]) return 0;
+
+    char buf[4096];
+    const char *prefix = git_rel_path(win, full_path, buf, sizeof(buf));
+    if (!prefix) return 0;
+
+    /* Check if this dir itself is listed as ignored: "dir/" */
+    char dir_key[4096];
+    snprintf(dir_key, sizeof(dir_key), "%s/", prefix);
+    gpointer dv = g_hash_table_lookup(win->git_status, dir_key);
+    if (dv && GPOINTER_TO_INT(dv) == 'I') return 'I';
+
+    /* Check if a parent dir is ignored */
+    if (is_path_ignored(win, prefix)) return 'I';
+
+    /* Check if ALL children in this dir are ignored (e.g. build/*.o all ignored) */
+    if (is_dir_all_ignored(win, prefix)) return 'I';
+
+    size_t plen = strlen(prefix);
+    int result = 0;
+    GHashTableIter iter;
+    gpointer key, val;
+    g_hash_table_iter_init(&iter, win->git_status);
+    while (g_hash_table_iter_next(&iter, &key, &val)) {
+        const char *k = key;
+        if (strncmp(k, prefix, plen) == 0 &&
+            (plen == 0 || k[plen] == '/')) {
+            int s = GPOINTER_TO_INT(val);
+            if (s == 'I') continue; /* don't count ignored towards dir status color */
+            /* Priority: conflict > modified > staged > untracked > deleted */
+            if (s == 'U') return 'U';
+            if (s == 'M' && result != 'U') result = 'M';
+            else if (s == 'A' && result != 'M' && result != 'U') result = 'A';
+            else if (s == '?' && !result) result = '?';
+            else if (s == 'D' && !result) result = 'D';
+        }
+    }
+    return result;
+}
+
+/* Parse `git status --porcelain` output into the hash table */
+static void parse_git_status(VibeWindow *win, const char *output) {
+    if (win->git_status)
+        g_hash_table_remove_all(win->git_status);
+    else
+        win->git_status = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+
+    if (!output) return;
+
+    char **lines = g_strsplit(output, "\n", -1);
+    for (char **p = lines; *p && **p; p++) {
+        const char *line = *p;
+        if (strlen(line) < 4) continue; /* "XY filename" minimum */
+
+        char x = line[0], y = line[1];
+        const char *path = line + 3;
+
+        /* Skip leading quotes for paths with spaces */
+        if (path[0] == '"') {
+            path++;
+            /* Remove trailing quote if present */
+        }
+
+        int status = 0;
+        if (x == '!' && y == '!')
+            status = 'I'; /* ignored */
+        else if (x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D'))
+            status = 'U'; /* conflict */
+        else if (x == '?' && y == '?')
+            status = '?'; /* untracked */
+        else if (x == 'A' || x == 'R' || x == 'C')
+            status = 'A'; /* staged */
+        else if (x == 'D' || y == 'D')
+            status = 'D'; /* deleted */
+        else if (x == 'M' || y == 'M')
+            status = 'M'; /* modified */
+
+        if (status) {
+            /* For renames "R  old -> new", use the new path */
+            const char *arrow = strstr(path, " -> ");
+            if (arrow) path = arrow + 4;
+
+            /* Remove trailing quote */
+            char *clean = g_strdup(path);
+            size_t clen = strlen(clean);
+            if (clen > 0 && clean[clen - 1] == '"') clean[clen - 1] = '\0';
+
+            g_hash_table_insert(win->git_status, clean, GINT_TO_POINTER(status));
+        }
+    }
+    g_strfreev(lines);
+}
+
+/* Async git status fetch context */
+typedef struct {
+    VibeWindow *win;
+    char       *git_root;    /* result: git root path */
+    char       *status_output; /* result: porcelain output */
+    /* SSH params snapshot */
+    char        ssh_host[256];
+    char        ssh_user[128];
+    int         ssh_port;
+    char        ssh_key[1024];
+    char        ssh_ctl_path[512];
+    char        dir_path[4096];  /* directory to check */
+    gboolean    is_remote;
+} GitStatusCtx;
+
+static void git_status_thread(GTask *task, gpointer src, gpointer data,
+                               GCancellable *cancel) {
+    (void)src; (void)cancel;
+    GitStatusCtx *ctx = data;
+
+    if (ctx->is_remote) {
+        /* Remote: run via SSH — get git root */
+        GPtrArray *av = ssh_argv_from_params(ctx->ssh_host, ctx->ssh_user,
+                                              ctx->ssh_port, ctx->ssh_key,
+                                              ctx->ssh_ctl_path);
+        g_ptr_array_add(av, g_strdup("--"));
+        g_ptr_array_add(av, g_strdup("git"));
+        g_ptr_array_add(av, g_strdup("-C"));
+        g_ptr_array_add(av, g_strdup(ctx->dir_path));
+        g_ptr_array_add(av, g_strdup("rev-parse"));
+        g_ptr_array_add(av, g_strdup("--show-toplevel"));
+
+        char *root = NULL;
+        if (ssh_spawn_sync(av, &root, NULL) && root) {
+            g_strstrip(root);
+            ctx->git_root = root;
+        }
+        g_ptr_array_unref(av);
+
+        /* Get status if we found a git root */
+        if (ctx->git_root) {
+            GPtrArray *av2 = ssh_argv_from_params(ctx->ssh_host, ctx->ssh_user,
+                                                    ctx->ssh_port, ctx->ssh_key,
+                                                    ctx->ssh_ctl_path);
+            g_ptr_array_add(av2, g_strdup("--"));
+            g_ptr_array_add(av2, g_strdup("git"));
+            g_ptr_array_add(av2, g_strdup("-C"));
+            g_ptr_array_add(av2, g_strdup(ctx->git_root));
+            g_ptr_array_add(av2, g_strdup("status"));
+            g_ptr_array_add(av2, g_strdup("--porcelain"));
+            g_ptr_array_add(av2, g_strdup("-u"));
+            g_ptr_array_add(av2, g_strdup("--ignored"));
+
+            char *status = NULL;
+            ssh_spawn_sync(av2, &status, NULL);
+            ctx->status_output = status;
+            g_ptr_array_unref(av2);
+        }
+    } else {
+        /* Local: run git directly */
+        const char *root_argv[] = {"git", "-C", ctx->dir_path, "rev-parse",
+                                    "--show-toplevel", NULL};
+        char *root = NULL;
+        gint exit_status = 0;
+        if (g_spawn_sync(NULL, (char **)root_argv, NULL, G_SPAWN_SEARCH_PATH,
+                          NULL, NULL, &root, NULL, &exit_status, NULL) &&
+            g_spawn_check_wait_status(exit_status, NULL) && root) {
+            g_strstrip(root);
+            ctx->git_root = root;
+
+            const char *status_argv[] = {"git", "-C", root, "status",
+                                          "--porcelain", "-u", "--ignored", NULL};
+            char *status = NULL;
+            if (g_spawn_sync(NULL, (char **)status_argv, NULL, G_SPAWN_SEARCH_PATH,
+                              NULL, NULL, &status, NULL, &exit_status, NULL) &&
+                g_spawn_check_wait_status(exit_status, NULL)) {
+                ctx->status_output = status;
+            } else {
+                g_free(status);
+            }
+        } else {
+            g_free(root);
+        }
+    }
+    g_task_return_boolean(task, ctx->git_root != NULL);
+}
+
+/* Apply git status colors to existing rows in the file list */
+static void apply_git_status_to_rows(VibeWindow *win);
+
+static void git_status_done(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    GitStatusCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+    win->git_status_in_flight = FALSE;
+
+    GError *err = NULL;
+    g_task_propagate_boolean(G_TASK(res), &err);
+    if (err) g_error_free(err);
+    if (g_cancellable_is_cancelled(win->cancellable)) {
+        g_free(ctx->git_root);
+        g_free(ctx->status_output);
+        g_free(ctx);
+        return;
+    }
+
+    if (ctx->git_root) {
+        g_strlcpy(win->git_root, ctx->git_root, sizeof(win->git_root));
+        parse_git_status(win, ctx->status_output);
+        apply_git_status_to_rows(win);
+    } else {
+        win->git_root[0] = '\0';
+        if (win->git_status) g_hash_table_remove_all(win->git_status);
+    }
+
+    g_free(ctx->git_root);
+    g_free(ctx->status_output);
+    g_free(ctx);
+}
+
+static void refresh_git_status(VibeWindow *win) {
+    if (win->git_status_in_flight) return;
+    if (!win->current_dir[0]) return;
+
+    GitStatusCtx *ctx = g_new0(GitStatusCtx, 1);
+    ctx->win = win;
+    ctx->is_remote = path_is_remote(win->current_dir) && win->ssh_host[0];
+
+    if (ctx->is_remote) {
+        char remote[4096];
+        ssh_to_remote_path(win->ssh_mount, win->ssh_remote_path,
+                           win->current_dir, remote, sizeof(remote));
+        g_strlcpy(ctx->dir_path, remote, sizeof(ctx->dir_path));
+        g_strlcpy(ctx->ssh_host, win->ssh_host, sizeof(ctx->ssh_host));
+        g_strlcpy(ctx->ssh_user, win->ssh_user, sizeof(ctx->ssh_user));
+        ctx->ssh_port = win->ssh_port;
+        g_strlcpy(ctx->ssh_key, win->ssh_key, sizeof(ctx->ssh_key));
+        g_strlcpy(ctx->ssh_ctl_path, win->ssh_ctl_path, sizeof(ctx->ssh_ctl_path));
+    } else {
+        g_strlcpy(ctx->dir_path, win->root_dir[0] ? win->root_dir : win->current_dir,
+                  sizeof(ctx->dir_path));
+    }
+
+    win->git_status_in_flight = TRUE;
+    GTask *task = g_task_new(NULL, win->cancellable, git_status_done, ctx);
+    g_task_set_task_data(task, ctx, NULL);
+    g_task_run_in_thread(task, git_status_thread);
+    g_object_unref(task);
+}
+
+/* Walk all rows and update labels with git status indicators.
+   Also hides ignored files when show_gitignored == 0. */
+static void apply_git_status_to_rows(VibeWindow *win) {
+    int show_ignored = win->settings.show_gitignored;
+
+    for (int i = 0; ; i++) {
+        GtkListBoxRow *row = gtk_list_box_get_row_at_index(win->file_list, i);
+        if (!row) break;
+        GtkWidget *lbl = gtk_widget_get_first_child(GTK_WIDGET(row));
+        if (!lbl) continue;
+
+        const char *full_path = g_object_get_data(G_OBJECT(lbl), "full-path");
+        if (!full_path) {
+            /* "Show more" rows etc — always visible */
+            gtk_widget_set_visible(GTK_WIDGET(row), TRUE);
+            continue;
+        }
+
+        gboolean is_dir = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(lbl), "is-dir"));
+        int status = is_dir ? git_status_for_dir(win, full_path)
+                            : git_status_for_path(win, full_path);
+
+        /* Handle ignored files */
+        if (status == 'I') {
+            if (show_ignored == 0) {
+                /* Hide ignored */
+                gtk_widget_set_visible(GTK_WIDGET(row), FALSE);
+                continue;
+            }
+            /* show_ignored == 1: show in gray (fall through to color) */
+        }
+
+        gtk_widget_set_visible(GTK_WIDGET(row), TRUE);
+
+        const char *color = git_status_color(status);
+        const char *current_text = gtk_label_get_text(GTK_LABEL(lbl));
+        if (!current_text) continue;
+
+        if (color) {
+            char *escaped = g_markup_escape_text(current_text, -1);
+            char markup[1024];
+            snprintf(markup, sizeof(markup),
+                     "<span foreground=\"%s\">%s</span>", color, escaped);
+            gtk_label_set_markup(GTK_LABEL(lbl), markup);
+            g_free(escaped);
+        } else {
+            gtk_label_set_text(GTK_LABEL(lbl), current_text);
+        }
+    }
+}
+
+/* ── Create a label row for the tree browser ── */
 
 static GtkWidget *create_tree_row(const char *full_path, const char *name,
                                    gboolean is_dir, int depth) {
@@ -567,8 +866,28 @@ static GtkWidget *create_tree_row(const char *full_path, const char *name,
     return lbl;
 }
 
-/* Insert sorted directory entries after a given row position (or at end if after_row is NULL).
-   Returns number of inserted rows. */
+/* Maximum entries to show before inserting a "Show more" row */
+#define DIR_BATCH_SIZE 500
+
+/* Data attached to "Show more" rows for lazy expansion */
+typedef struct {
+    char   **names;     /* remaining entry names (owned) */
+    gboolean *is_dirs;  /* whether each entry is a dir */
+    int       count;    /* number of remaining entries */
+    char      dir_path[4096];
+    int       depth;
+} LazyLoadData;
+
+static void lazy_load_data_free(gpointer p) {
+    LazyLoadData *d = p;
+    for (int i = 0; i < d->count; i++) g_free(d->names[i]);
+    g_free(d->names);
+    g_free(d->is_dirs);
+    g_free(d);
+}
+
+/* Insert sorted directory entries after a given row position.
+   Returns number of inserted rows (including possible "Show more" row). */
 static int insert_children(VibeWindow *win, const char *dir_path, int depth,
                             int insert_pos) {
     DIR *dir = opendir(dir_path);
@@ -578,7 +897,10 @@ static int insert_children(VibeWindow *win, const char *dir_path, int depth,
     int count = 0, capacity = 0;
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
+        /* Always skip . and .. */
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        /* Skip dotfiles unless show_hidden is enabled */
+        if (ent->d_name[0] == '.' && !win->settings.show_hidden) continue;
         if (count >= capacity) {
             capacity = capacity ? capacity * 2 : 64;
             struct dirent **tmp = realloc(entries, sizeof(struct dirent *) * capacity);
@@ -600,11 +922,13 @@ static int insert_children(VibeWindow *win, const char *dir_path, int depth,
 
     qsort(entries, count, sizeof(struct dirent *), entry_compare);
 
-    for (int i = 0; i < count; i++) {
+    int show = count <= DIR_BATCH_SIZE ? count : DIR_BATCH_SIZE;
+    int inserted = 0;
+
+    for (int i = 0; i < show; i++) {
         char full[4096];
         snprintf(full, sizeof(full), "%s/%s", dir_path, entries[i]->d_name);
 
-        /* d_type is DT_UNKNOWN on FUSE/sshfs — fall back to stat() */
         gboolean is_dir_entry;
         if (entries[i]->d_type != DT_UNKNOWN)
             is_dir_entry = (entries[i]->d_type == DT_DIR);
@@ -614,184 +938,91 @@ static int insert_children(VibeWindow *win, const char *dir_path, int depth,
         }
 
         GtkWidget *lbl = create_tree_row(full, entries[i]->d_name, is_dir_entry, depth);
-        gtk_list_box_insert(win->file_list, lbl, insert_pos + i);
-
-        free(entries[i]);
+        int pos = insert_pos >= 0 ? insert_pos + inserted : -1;
+        gtk_list_box_insert(win->file_list, lbl, pos);
+        inserted++;
     }
+
+    /* If there are more entries, add a "Show more" row */
+    if (count > DIR_BATCH_SIZE) {
+        int remaining = count - DIR_BATCH_SIZE;
+        LazyLoadData *lazy = g_new0(LazyLoadData, 1);
+        lazy->count = remaining;
+        lazy->depth = depth;
+        g_strlcpy(lazy->dir_path, dir_path, sizeof(lazy->dir_path));
+        lazy->names = g_new(char *, remaining);
+        lazy->is_dirs = g_new(gboolean, remaining);
+
+        for (int i = 0; i < remaining; i++) {
+            int si = DIR_BATCH_SIZE + i;
+            lazy->names[i] = g_strdup(entries[si]->d_name);
+            if (entries[si]->d_type != DT_UNKNOWN)
+                lazy->is_dirs[i] = (entries[si]->d_type == DT_DIR);
+            else {
+                char full[4096];
+                snprintf(full, sizeof(full), "%s/%s", dir_path, entries[si]->d_name);
+                struct stat st;
+                lazy->is_dirs[i] = (stat(full, &st) == 0 && S_ISDIR(st.st_mode));
+            }
+        }
+
+        char indent[128] = "";
+        for (int d = 0; d < depth; d++) strcat(indent, "  ");
+        char label_text[256];
+        snprintf(label_text, sizeof(label_text), "%s  ⋯ Show %d more…", indent, remaining);
+        GtkWidget *lbl = gtk_label_new(label_text);
+        gtk_label_set_xalign(GTK_LABEL(lbl), 0);
+        gtk_widget_set_margin_start(lbl, 8);
+        gtk_widget_set_margin_end(lbl, 8);
+        gtk_widget_set_margin_top(lbl, 4);
+        gtk_widget_set_margin_bottom(lbl, 4);
+        gtk_widget_add_css_class(lbl, "dim-label");
+
+        g_object_set_data(G_OBJECT(lbl), "is-dir", GINT_TO_POINTER(FALSE));
+        g_object_set_data(G_OBJECT(lbl), "depth", GINT_TO_POINTER(depth));
+        g_object_set_data(G_OBJECT(lbl), "expanded", GINT_TO_POINTER(FALSE));
+        g_object_set_data_full(G_OBJECT(lbl), "lazy-load", lazy, lazy_load_data_free);
+
+        int pos = insert_pos >= 0 ? insert_pos + inserted : -1;
+        gtk_list_box_insert(win->file_list, lbl, pos);
+        inserted++;
+    }
+
+    for (int i = 0; i < count; i++) free(entries[i]);
     free(entries);
-    return count;
+    return inserted;
 }
 
 /* ── SSH ls-based directory listing (avoids FUSE blocking) ── */
 
-/* Convert local mount path to remote path.
-   e.g. /tmp/vibe-light-sftp-123-user@host/subdir → /opt/subdir
-   (if ssh_mount="/tmp/vibe-light-sftp-123-user@host" and ssh_remote_path="/opt") */
+/* Wrapper for ssh_to_remote_path using window state */
 static const char *to_remote_path(VibeWindow *win, const char *local_path,
                                    char *buf, size_t buflen) {
-    size_t mlen = strlen(win->ssh_mount);
-    const char *suffix = local_path + mlen; /* e.g. "" or "/subdir" */
-    snprintf(buf, buflen, "%s%s", win->ssh_remote_path, suffix);
-    return buf;
+    return ssh_to_remote_path(win->ssh_mount, win->ssh_remote_path,
+                              local_path, buf, buflen);
 }
 
-/* Build SSH base argv — caller must free with g_ptr_array_unref().
-   Does NOT add trailing NULL — caller adds command args + NULL.
-   Uses ControlMaster multiplexing when a control socket exists. */
-static GPtrArray *ssh_argv_new(VibeWindow *win) {
-    GPtrArray *av = g_ptr_array_new_with_free_func(g_free);
-    g_ptr_array_add(av, g_strdup("ssh"));
-    g_ptr_array_add(av, g_strdup("-p"));
-    g_ptr_array_add(av, g_strdup_printf("%d", win->ssh_port));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("StrictHostKeyChecking=accept-new"));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("BatchMode=yes"));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("ConnectTimeout=10"));
-    if (win->ssh_ctl_path[0]) {
-        g_ptr_array_add(av, g_strdup("-o"));
-        g_ptr_array_add(av, g_strdup_printf("ControlPath=%s", win->ssh_ctl_path));
-    }
-    if (win->ssh_key[0]) {
-        g_ptr_array_add(av, g_strdup("-i"));
-        g_ptr_array_add(av, g_strdup(win->ssh_key));
-    }
-    g_ptr_array_add(av, g_strdup_printf("%s@%s", win->ssh_user, win->ssh_host));
-    return av;
-}
-
-/* Also build argv from plain params (for use in background threads) */
-static GPtrArray *ssh_argv_from_params(const char *host, const char *user,
-                                        int port, const char *key,
-                                        const char *ctl_path) {
-    GPtrArray *av = g_ptr_array_new_with_free_func(g_free);
-    g_ptr_array_add(av, g_strdup("ssh"));
-    g_ptr_array_add(av, g_strdup("-p"));
-    g_ptr_array_add(av, g_strdup_printf("%d", port));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("StrictHostKeyChecking=accept-new"));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("BatchMode=yes"));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("ConnectTimeout=5"));
-    if (ctl_path[0]) {
-        g_ptr_array_add(av, g_strdup("-o"));
-        g_ptr_array_add(av, g_strdup_printf("ControlPath=%s", ctl_path));
-    }
-    if (key[0]) {
-        g_ptr_array_add(av, g_strdup("-i"));
-        g_ptr_array_add(av, g_strdup(key));
-    }
-    g_ptr_array_add(av, g_strdup_printf("%s@%s", user, host));
-    return av;
+/* Wrapper for ssh_argv_new using window state */
+static GPtrArray *win_ssh_argv(VibeWindow *win) {
+    return ssh_argv_new(win->ssh_host, win->ssh_user, win->ssh_port,
+                        win->ssh_key, win->ssh_ctl_path);
 }
 
 /* ── SSH ControlMaster lifecycle ── */
 
-static void ssh_ctl_start(VibeWindow *win) {
-    /* Use XDG_RUNTIME_DIR (user-private, tmpfs) or fall back to /tmp with mkdtemp */
-    const char *runtime = g_get_user_runtime_dir(); /* XDG_RUNTIME_DIR or fallback */
-    snprintf(win->ssh_ctl_dir, sizeof(win->ssh_ctl_dir),
-             "%s/vibe-ssh-XXXXXX", runtime);
-    if (!mkdtemp(win->ssh_ctl_dir)) {
-        win->ssh_ctl_dir[0] = '\0';
-        win->ssh_ctl_path[0] = '\0';
-        return;
-    }
-    snprintf(win->ssh_ctl_path, sizeof(win->ssh_ctl_path),
-             "%s/ctl", win->ssh_ctl_dir);
-
-    GPtrArray *av = g_ptr_array_new_with_free_func(g_free);
-    g_ptr_array_add(av, g_strdup("ssh"));
-    g_ptr_array_add(av, g_strdup("-p"));
-    g_ptr_array_add(av, g_strdup_printf("%d", win->ssh_port));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("StrictHostKeyChecking=accept-new"));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("BatchMode=yes"));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("ConnectTimeout=10"));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("ControlMaster=yes"));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup_printf("ControlPath=%s", win->ssh_ctl_path));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup("ControlPersist=60"));
-    if (win->ssh_key[0]) {
-        g_ptr_array_add(av, g_strdup("-i"));
-        g_ptr_array_add(av, g_strdup(win->ssh_key));
-    }
-    g_ptr_array_add(av, g_strdup_printf("%s@%s", win->ssh_user, win->ssh_host));
-    g_ptr_array_add(av, g_strdup("-fN")); /* fork to background, no command */
-    g_ptr_array_add(av, NULL);
-
-    g_spawn_sync(NULL, (char **)av->pdata, NULL,
-                 G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL, NULL);
-    g_ptr_array_unref(av);
+/* Wrappers for ssh_ctl_start/stop using window state */
+static void win_ssh_ctl_start(VibeWindow *win) {
+    ssh_ctl_start(win->ssh_ctl_dir, sizeof(win->ssh_ctl_dir),
+                  win->ssh_ctl_path, sizeof(win->ssh_ctl_path),
+                  win->ssh_host, win->ssh_user, win->ssh_port, win->ssh_key);
 }
 
-static void ssh_ctl_stop(VibeWindow *win) {
-    if (!win->ssh_ctl_path[0]) return;
-
-    GPtrArray *av = g_ptr_array_new_with_free_func(g_free);
-    g_ptr_array_add(av, g_strdup("ssh"));
-    g_ptr_array_add(av, g_strdup("-o"));
-    g_ptr_array_add(av, g_strdup_printf("ControlPath=%s", win->ssh_ctl_path));
-    g_ptr_array_add(av, g_strdup("-O"));
-    g_ptr_array_add(av, g_strdup("exit"));
-    g_ptr_array_add(av, g_strdup_printf("%s@%s", win->ssh_user, win->ssh_host));
-    g_ptr_array_add(av, NULL);
-
-    g_spawn_sync(NULL, (char **)av->pdata, NULL,
-                 G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL, NULL);
-    g_ptr_array_unref(av);
-
-    unlink(win->ssh_ctl_path);
-    win->ssh_ctl_path[0] = '\0';
-    if (win->ssh_ctl_dir[0]) {
-        rmdir(win->ssh_ctl_dir);
-        win->ssh_ctl_dir[0] = '\0';
-    }
+static void win_ssh_ctl_stop(VibeWindow *win) {
+    ssh_ctl_stop(win->ssh_ctl_path, win->ssh_ctl_dir,
+                 win->ssh_host, win->ssh_user);
 }
 
-/* Run SSH command synchronously with argv (no shell — immune to injection).
-   Returns TRUE on success. out_stdout/out_len may be NULL. */
-static gboolean ssh_spawn_sync(GPtrArray *argv, char **out_stdout,
-                                gsize *out_len) {
-    g_ptr_array_add(argv, NULL);
-
-    char *stdout_buf = NULL;
-    GError *err = NULL;
-    gint status = 0;
-
-    gboolean ok = g_spawn_sync(
-        NULL, (char **)argv->pdata, NULL,
-        G_SPAWN_SEARCH_PATH,
-        NULL, NULL, &stdout_buf, NULL, &status, &err);
-
-    /* remove trailing NULL so caller can reuse argv */
-    g_ptr_array_set_size(argv, argv->len - 1);
-
-    if (!ok) {
-        if (err) g_error_free(err);
-        return FALSE;
-    }
-    if (!g_spawn_check_wait_status(status, NULL)) {
-        g_free(stdout_buf);
-        return FALSE;
-    }
-
-    if (out_len)
-        *out_len = stdout_buf ? strlen(stdout_buf) : 0;
-
-    if (out_stdout)
-        *out_stdout = stdout_buf;
-    else
-        g_free(stdout_buf);
-
-    return TRUE;
-}
+/* ssh_spawn_sync is now in ssh.c */
 
 /* Run SSH ls synchronously and populate file list */
 static void ssh_ls_populate(VibeWindow *win, const char *local_dir_path,
@@ -799,7 +1030,7 @@ static void ssh_ls_populate(VibeWindow *win, const char *local_dir_path,
     char remote[4096];
     to_remote_path(win, local_dir_path, remote, sizeof(remote));
 
-    GPtrArray *av = ssh_argv_new(win);
+    GPtrArray *av = win_ssh_argv(win);
     g_ptr_array_add(av, g_strdup("--"));
     g_ptr_array_add(av, g_strdup("ls"));
     g_ptr_array_add(av, g_strdup("-1pA"));
@@ -825,6 +1056,8 @@ static void ssh_ls_populate(VibeWindow *win, const char *local_dir_path,
             char *name = lines[i];
             int len = (int)strlen(name);
             if (!len) continue;
+            /* Skip hidden files unless show_hidden */
+            if (name[0] == '.' && !win->settings.show_hidden) continue;
             gboolean is_dir = (name[len - 1] == '/');
             if ((pass == 0 && !is_dir) || (pass == 1 && is_dir)) continue;
 
@@ -1001,6 +1234,7 @@ static void refresh_file_list_local(VibeWindow *win) {
     restore_expanded(win, expanded);
     g_ptr_array_unref(expanded);
     update_file_status(win);
+    refresh_git_status(win);
 }
 
 /* Remote refresh via GTask — ssh_ls_populate runs in callback on main thread
@@ -1076,6 +1310,7 @@ static void remote_refresh_done(GObject *src, GAsyncResult *res, gpointer data) 
                 char *name = lines[i];
                 int len = (int)strlen(name);
                 if (!len) continue;
+                if (name[0] == '.' && !win->settings.show_hidden) continue;
                 gboolean is_dir = (name[len - 1] == '/');
                 if ((pass == 0 && !is_dir) || (pass == 1 && is_dir)) continue;
 
@@ -1098,6 +1333,7 @@ static void remote_refresh_done(GObject *src, GAsyncResult *res, gpointer data) 
     restore_expanded(win, ctx->expanded);
     g_ptr_array_unref(ctx->expanded);
     update_file_status(win);
+    refresh_git_status(win);
     g_free(ctx);
 }
 
@@ -1148,13 +1384,7 @@ static void on_dir_changed(GFileMonitor *mon, GFile *file, GFile *other,
     win->fs_refresh_id = g_timeout_add(200, fs_refresh_cb, win);
 }
 
-/* Simple djb2 hash for comparing ls output */
-static guint32 djb2_hash(const char *str) {
-    guint32 h = 5381;
-    for (; *str; str++)
-        h = ((h << 5) + h) + (unsigned char)*str;
-    return h;
-}
+/* djb2_hash is now in ssh.c as ssh_djb2_hash */
 
 /* ── Remote inotifywait-based directory watching ──
    Spawns: ssh ... inotifywait -m -e create,delete,move,modify --format '%e' <dir>
@@ -1215,44 +1445,11 @@ static void start_remote_inotifywait(VibeWindow *win, const char *remote_dir);
 
 /* Fallback polling — used when inotifywait is not available */
 
-typedef struct {
-    VibeWindow *win;
-    char        remote_path[4096];
-    char        local_dir[4096];
-    char        ssh_host[256];
-    char        ssh_user[128];
-    int         ssh_port;
-    char        ssh_key[1024];
-    char        ssh_ctl_path[256];
-} RemoteDirPollCtx;
-
-static void remote_dir_poll_thread(GTask *task, gpointer src, gpointer data,
-                                    GCancellable *cancel) {
-    (void)src; (void)cancel;
-    RemoteDirPollCtx *ctx = data;
-
-    GPtrArray *av = ssh_argv_from_params(ctx->ssh_host, ctx->ssh_user,
-                                          ctx->ssh_port, ctx->ssh_key,
-                                          ctx->ssh_ctl_path);
-    g_ptr_array_add(av, g_strdup("--"));
-    g_ptr_array_add(av, g_strdup("ls"));
-    g_ptr_array_add(av, g_strdup("-1pA"));
-    g_ptr_array_add(av, g_strdup(ctx->remote_path));
-
-    char *stdout_buf = NULL;
-    if (ssh_spawn_sync(av, &stdout_buf, NULL) && stdout_buf) {
-        guint32 h = djb2_hash(stdout_buf);
-        g_task_return_int(task, (gint64)h);
-        g_free(stdout_buf);
-    } else {
-        g_task_return_int(task, 0);
-    }
-    g_ptr_array_unref(av);
-}
+/* RemoteDirPollCtx and thread function are now SshDirPollCtx in ssh.c */
 
 static void remote_dir_poll_done(GObject *src, GAsyncResult *res, gpointer data) {
     (void)src;
-    RemoteDirPollCtx *ctx = data;
+    SshDirPollCtx *ctx = data;
     VibeWindow *win = ctx->win;
     win->dir_poll_in_flight = FALSE;
 
@@ -1275,7 +1472,7 @@ static gboolean remote_dir_poll_tick(gpointer data) {
     if (!win->ssh_host[0] || !win->current_dir[0]) return G_SOURCE_REMOVE;
     if (win->dir_poll_in_flight) return G_SOURCE_CONTINUE; /* skip if previous still running */
 
-    RemoteDirPollCtx *ctx = g_new0(RemoteDirPollCtx, 1);
+    SshDirPollCtx *ctx = g_new0(SshDirPollCtx, 1);
     ctx->win = win;
     g_strlcpy(ctx->local_dir, win->current_dir, sizeof(ctx->local_dir));
     g_strlcpy(ctx->ssh_host, win->ssh_host, sizeof(ctx->ssh_host));
@@ -1291,7 +1488,7 @@ static gboolean remote_dir_poll_tick(gpointer data) {
     win->dir_poll_in_flight = TRUE;
     GTask *task = g_task_new(NULL, NULL, remote_dir_poll_done, ctx);
     g_task_set_task_data(task, ctx, NULL);
-    g_task_run_in_thread(task, remote_dir_poll_thread);
+    g_task_run_in_thread(task, ssh_dir_poll_thread);
     g_object_unref(task);
 
     return G_SOURCE_CONTINUE;
@@ -1305,37 +1502,11 @@ static void start_remote_fallback_poll(VibeWindow *win) {
 
 /* Try to spawn inotifywait; if it fails (exit code != 0 quickly), fall back to polling */
 
-typedef struct {
-    VibeWindow *win;
-    char        remote_dir[4096];
-    char        ssh_host[256];
-    char        ssh_user[128];
-    int         ssh_port;
-    char        ssh_key[1024];
-    char        ssh_ctl_path[512];
-} InotifyCheckCtx;
-
-static void inotifywait_check_thread(GTask *task, gpointer src, gpointer data,
-                                      GCancellable *cancel) {
-    (void)src; (void)cancel;
-    InotifyCheckCtx *ctx = data;
-
-    GPtrArray *av = ssh_argv_from_params(ctx->ssh_host, ctx->ssh_user,
-                                          ctx->ssh_port, ctx->ssh_key,
-                                          ctx->ssh_ctl_path);
-    g_ptr_array_add(av, g_strdup("--"));
-    g_ptr_array_add(av, g_strdup("which"));
-    g_ptr_array_add(av, g_strdup("inotifywait"));
-
-    gboolean has_it = ssh_spawn_sync(av, NULL, NULL);
-    g_ptr_array_unref(av);
-
-    g_task_return_boolean(task, has_it);
-}
+/* InotifyCheckCtx and thread function are now SshInotifyCheckCtx in ssh.c */
 
 static void inotifywait_check_done(GObject *src, GAsyncResult *res, gpointer data) {
     (void)src;
-    InotifyCheckCtx *ctx = data;
+    SshInotifyCheckCtx *ctx = data;
     VibeWindow *win = ctx->win;
     GError *err = NULL;
     gboolean has_it = g_task_propagate_boolean(G_TASK(res), &err);
@@ -1353,7 +1524,7 @@ static void inotifywait_check_done(GObject *src, GAsyncResult *res, gpointer dat
 }
 
 static void start_remote_inotifywait(VibeWindow *win, const char *remote_dir) {
-    GPtrArray *av = ssh_argv_new(win);
+    GPtrArray *av = win_ssh_argv(win);
     g_ptr_array_add(av, g_strdup("--"));
     g_ptr_array_add(av, g_strdup("inotifywait"));
     g_ptr_array_add(av, g_strdup("-m"));
@@ -1387,45 +1558,11 @@ static void start_remote_inotifywait(VibeWindow *win, const char *remote_dir) {
 
 /* --- Remote file mtime polling (for open file in editor) --- */
 
-typedef struct {
-    VibeWindow *win;
-    char        remote_path[4096];
-    char        local_path[4096];
-    char        ssh_host[256];
-    char        ssh_user[128];
-    int         ssh_port;
-    char        ssh_key[1024];
-    char        ssh_ctl_path[256];
-} RemoteFilePollCtx;
-
-static void remote_file_poll_thread(GTask *task, gpointer src, gpointer data,
-                                     GCancellable *cancel) {
-    (void)src; (void)cancel;
-    RemoteFilePollCtx *ctx = data;
-
-    GPtrArray *av = ssh_argv_from_params(ctx->ssh_host, ctx->ssh_user,
-                                          ctx->ssh_port, ctx->ssh_key,
-                                          ctx->ssh_ctl_path);
-    g_ptr_array_add(av, g_strdup("--"));
-    g_ptr_array_add(av, g_strdup("stat"));
-    g_ptr_array_add(av, g_strdup("-c"));
-    g_ptr_array_add(av, g_strdup("%Y"));
-    g_ptr_array_add(av, g_strdup(ctx->remote_path));
-
-    char *stdout_buf = NULL;
-    if (ssh_spawn_sync(av, &stdout_buf, NULL) && stdout_buf) {
-        gint64 mtime = g_ascii_strtoll(stdout_buf, NULL, 10);
-        g_task_return_int(task, mtime);
-        g_free(stdout_buf);
-    } else {
-        g_task_return_int(task, 0);
-    }
-    g_ptr_array_unref(av);
-}
+/* RemoteFilePollCtx and thread function are now SshFilePollCtx in ssh.c */
 
 static void remote_file_poll_done(GObject *src, GAsyncResult *res, gpointer data) {
     (void)src;
-    RemoteFilePollCtx *ctx = data;
+    SshFilePollCtx *ctx = data;
     VibeWindow *win = ctx->win;
     win->file_poll_in_flight = FALSE;
 
@@ -1447,7 +1584,7 @@ static gboolean remote_file_poll_tick(gpointer data) {
     if (!win->ssh_host[0] || !win->current_file[0]) return G_SOURCE_REMOVE;
     if (win->file_poll_in_flight) return G_SOURCE_CONTINUE;
 
-    RemoteFilePollCtx *ctx = g_new0(RemoteFilePollCtx, 1);
+    SshFilePollCtx *ctx = g_new0(SshFilePollCtx, 1);
     ctx->win = win;
     g_strlcpy(ctx->local_path, win->current_file, sizeof(ctx->local_path));
     g_strlcpy(ctx->ssh_host, win->ssh_host, sizeof(ctx->ssh_host));
@@ -1463,7 +1600,7 @@ static gboolean remote_file_poll_tick(gpointer data) {
     win->file_poll_in_flight = TRUE;
     GTask *task = g_task_new(NULL, NULL, remote_file_poll_done, ctx);
     g_task_set_task_data(task, ctx, NULL);
-    g_task_run_in_thread(task, remote_file_poll_thread);
+    g_task_run_in_thread(task, ssh_file_poll_thread);
     g_object_unref(task);
 
     return G_SOURCE_CONTINUE;
@@ -1479,7 +1616,7 @@ static void start_dir_monitor(VibeWindow *win, const char *path) {
         char remote[4096];
         to_remote_path(win, path, remote, sizeof(remote));
 
-        InotifyCheckCtx *ctx = g_new0(InotifyCheckCtx, 1);
+        SshInotifyCheckCtx *ctx = g_new0(SshInotifyCheckCtx, 1);
         ctx->win = win;
         g_strlcpy(ctx->remote_dir, remote, sizeof(ctx->remote_dir));
         g_strlcpy(ctx->ssh_host, win->ssh_host, sizeof(ctx->ssh_host));
@@ -1490,7 +1627,7 @@ static void start_dir_monitor(VibeWindow *win, const char *path) {
 
         GTask *task = g_task_new(NULL, NULL, inotifywait_check_done, ctx);
         g_task_set_task_data(task, ctx, NULL);
-        g_task_run_in_thread(task, inotifywait_check_thread);
+        g_task_run_in_thread(task, ssh_inotify_check_thread);
         g_object_unref(task);
         return;
     }
@@ -1587,6 +1724,7 @@ void vibe_window_open_directory(VibeWindow *win, const char *path) {
     fprintf(stderr, "OPENDIR: done\n");
     update_file_status(win);
     start_dir_monitor(win, path);
+    refresh_git_status(win);
 
     gtk_notebook_set_current_page(win->notebook, 0);
 }
@@ -1597,7 +1735,7 @@ void vibe_window_set_root_directory(VibeWindow *win, const char *path) {
     fprintf(stderr, "SETROOT: remote=%d host=%s\n", path_is_remote(path), win->ssh_host);
     if (path_is_remote(path) && win->ssh_host[0]) {
         /* Start SSH ControlMaster for multiplexed connections */
-        ssh_ctl_start(win);
+        win_ssh_ctl_start(win);
         /* spawn ssh session in terminal */
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%d", win->ssh_port);
@@ -1649,97 +1787,120 @@ void vibe_window_set_root_directory(VibeWindow *win, const char *path) {
 
 #define MAX_FILE_SIZE (10 * 1024 * 1024) /* 10 MB */
 
-/* Read remote file via SSH cat using GSubprocess (binary-safe). */
-static gboolean ssh_cat_file(VibeWindow *win, const char *local_path,
-                              char **out_contents, gsize *out_len) {
-    char remote[4096];
-    to_remote_path(win, local_path, remote, sizeof(remote));
 
-    GPtrArray *av = ssh_argv_new(win);
-    g_ptr_array_add(av, g_strdup("--"));
-    g_ptr_array_add(av, g_strdup("cat"));
-    g_ptr_array_add(av, g_strdup(remote));
-    g_ptr_array_add(av, NULL);
+/* ── Async file loading ── */
 
-    GError *err = NULL;
-    GSubprocess *proc = g_subprocess_newv(
-        (const char * const *)av->pdata,
-        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
-        &err);
-    g_ptr_array_unref(av);
+typedef struct {
+    VibeWindow *win;
+    char        filepath[4096];
+    char       *contents;    /* owned, result from thread */
+    gsize       len;
+    gboolean    ok;
+    /* SSH params snapshot (for thread safety) */
+    char        ssh_host[256];
+    char        ssh_user[128];
+    int         ssh_port;
+    char        ssh_key[1024];
+    char        ssh_ctl_path[512];
+    char        ssh_mount[2048];
+    char        ssh_remote_path[1024];
+} FileLoadCtx;
 
-    if (!proc) {
-        if (err) g_error_free(err);
-        return FALSE;
+static void file_load_thread(GTask *task, gpointer src, gpointer data,
+                              GCancellable *cancel) {
+    (void)src; (void)cancel;
+    FileLoadCtx *ctx = data;
+
+    if (ssh_path_is_remote(ctx->filepath) && ctx->ssh_host[0]) {
+        ctx->ok = ssh_cat_file(ctx->ssh_host, ctx->ssh_user, ctx->ssh_port,
+                               ctx->ssh_key, ctx->ssh_ctl_path,
+                               ctx->ssh_mount, ctx->ssh_remote_path,
+                               ctx->filepath, &ctx->contents, &ctx->len,
+                               MAX_FILE_SIZE);
+    } else {
+        ctx->ok = g_file_get_contents(ctx->filepath, &ctx->contents, &ctx->len, NULL);
     }
-
-    GBytes *stdout_bytes = NULL;
-    gboolean ok = g_subprocess_communicate(proc, NULL, NULL, &stdout_bytes, NULL, &err);
-
-    if (!ok || !g_subprocess_get_successful(proc)) {
-        if (stdout_bytes) g_bytes_unref(stdout_bytes);
-        g_object_unref(proc);
-        if (err) g_error_free(err);
-        return FALSE;
-    }
-
-    gsize len = 0;
-    const char *data = g_bytes_get_data(stdout_bytes, &len);
-
-    if (len > MAX_FILE_SIZE) {
-        g_bytes_unref(stdout_bytes);
-        g_object_unref(proc);
-        *out_contents = g_strdup("(file too large)");
-        *out_len = strlen(*out_contents);
-        return TRUE;
-    }
-
-    /* copy with extra NUL for text safety */
-    *out_contents = g_malloc(len + 1);
-    if (data && len) memcpy(*out_contents, data, len);
-    (*out_contents)[len] = '\0';
-    *out_len = len;
-
-    g_bytes_unref(stdout_bytes);
-    g_object_unref(proc);
-    return TRUE;
+    g_task_return_boolean(task, ctx->ok);
 }
 
-static void load_file_content(VibeWindow *win, const char *filepath) {
-    char *contents = NULL;
-    gsize len = 0;
-    gboolean ok = FALSE;
+static void file_load_done(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    FileLoadCtx *ctx = data;
+    VibeWindow *win = ctx->win;
 
-    if (path_is_remote(filepath) && win->ssh_host[0]) {
-        ok = ssh_cat_file(win, filepath, &contents, &len);
-    } else {
-        ok = g_file_get_contents(filepath, &contents, &len, NULL);
+    GError *err = NULL;
+    g_task_propagate_boolean(G_TASK(res), &err);
+    if (err) g_error_free(err);
+
+    /* Check if window is destroyed or file changed while loading */
+    if (g_cancellable_is_cancelled(win->cancellable) ||
+        strcmp(win->current_file, ctx->filepath) != 0) {
+        g_free(ctx->contents);
+        g_free(ctx);
+        return;
     }
 
-    if (ok && contents) {
-        if (len > MAX_FILE_SIZE) {
-            gtk_text_buffer_set_text(win->file_buffer, "(file too large)", -1);
+    GtkTextBuffer *tbuf = GTK_TEXT_BUFFER(win->file_buffer);
+
+    if (ctx->ok && ctx->contents) {
+        if (ctx->len > MAX_FILE_SIZE) {
+            gtk_text_buffer_set_text(tbuf, "(file too large)", -1);
         } else {
             /* binary check — scan first 8 KB for NUL bytes */
             gboolean is_binary = FALSE;
-            gsize check = len < 8192 ? len : 8192;
+            gsize check = ctx->len < 8192 ? ctx->len : 8192;
             for (gsize i = 0; i < check; i++) {
-                if (contents[i] == '\0') { is_binary = TRUE; break; }
+                if (ctx->contents[i] == '\0') { is_binary = TRUE; break; }
             }
-            if (is_binary)
-                gtk_text_buffer_set_text(win->file_buffer, "(binary file)", -1);
-            else
-                gtk_text_buffer_set_text(win->file_buffer, contents, (gssize)len);
+            if (is_binary) {
+                gtk_text_buffer_set_text(tbuf, "(binary file)", -1);
+            } else {
+                gtk_text_buffer_set_text(tbuf, ctx->contents, (gssize)ctx->len);
+            }
         }
-        g_free(contents);
     } else {
-        gtk_text_buffer_set_text(win->file_buffer, "(cannot read file)", -1);
+        gtk_text_buffer_set_text(tbuf, "(cannot read file)", -1);
     }
 
+    /* Set syntax highlighting language based on filename + content type */
+    GtkSourceLanguageManager *lm = gtk_source_language_manager_get_default();
+    gchar *content_type = g_content_type_guess(ctx->filepath, NULL, 0, NULL);
+    GtkSourceLanguage *lang = gtk_source_language_manager_guess_language(lm, ctx->filepath, content_type);
+    g_free(content_type);
+    gtk_source_buffer_set_language(win->file_buffer, lang);
+    gtk_source_buffer_set_highlight_syntax(win->file_buffer, lang != NULL);
+
     GtkTextIter start;
-    gtk_text_buffer_get_start_iter(win->file_buffer, &start);
-    gtk_text_buffer_place_cursor(win->file_buffer, &start);
+    gtk_text_buffer_get_start_iter(tbuf, &start);
+    gtk_text_buffer_place_cursor(tbuf, &start);
     apply_font_intensity(win);
+
+    g_free(ctx->contents);
+    g_free(ctx);
+}
+
+static void load_file_content(VibeWindow *win, const char *filepath) {
+    /* Store filepath immediately for guard checks */
+    g_strlcpy(win->current_file, filepath, sizeof(win->current_file));
+
+    /* Show loading indicator */
+    gtk_text_buffer_set_text(GTK_TEXT_BUFFER(win->file_buffer), "Loading…", -1);
+
+    FileLoadCtx *ctx = g_new0(FileLoadCtx, 1);
+    ctx->win = win;
+    g_strlcpy(ctx->filepath, filepath, sizeof(ctx->filepath));
+    g_strlcpy(ctx->ssh_host, win->ssh_host, sizeof(ctx->ssh_host));
+    g_strlcpy(ctx->ssh_user, win->ssh_user, sizeof(ctx->ssh_user));
+    ctx->ssh_port = win->ssh_port;
+    g_strlcpy(ctx->ssh_key, win->ssh_key, sizeof(ctx->ssh_key));
+    g_strlcpy(ctx->ssh_ctl_path, win->ssh_ctl_path, sizeof(ctx->ssh_ctl_path));
+    g_strlcpy(ctx->ssh_mount, win->ssh_mount, sizeof(ctx->ssh_mount));
+    g_strlcpy(ctx->ssh_remote_path, win->ssh_remote_path, sizeof(ctx->ssh_remote_path));
+
+    GTask *task = g_task_new(NULL, win->cancellable, file_load_done, ctx);
+    g_task_set_task_data(task, ctx, NULL);
+    g_task_run_in_thread(task, file_load_thread);
+    g_object_unref(task);
 }
 
 /* Wrapper that also starts file monitor — called from row activation */
@@ -1757,6 +1918,57 @@ static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer 
     gboolean is_dir = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(label), "is-dir"));
     int depth = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(label), "depth"));
     gboolean expanded = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(label), "expanded"));
+
+    /* Handle "Show more" lazy-load rows */
+    LazyLoadData *lazy = g_object_get_data(G_OBJECT(label), "lazy-load");
+    if (lazy) {
+        int row_idx = gtk_list_box_row_get_index(row);
+        /* Remove this "show more" row */
+        gtk_list_box_remove(win->file_list, GTK_WIDGET(row));
+
+        /* Insert remaining entries */
+        int show = lazy->count <= DIR_BATCH_SIZE ? lazy->count : DIR_BATCH_SIZE;
+        for (int i = 0; i < show; i++) {
+            char full[4096];
+            snprintf(full, sizeof(full), "%s/%s", lazy->dir_path, lazy->names[i]);
+            GtkWidget *lbl = create_tree_row(full, lazy->names[i], lazy->is_dirs[i], lazy->depth);
+            gtk_list_box_insert(win->file_list, lbl, row_idx + i);
+        }
+
+        /* If still more, add another "show more" row */
+        if (lazy->count > DIR_BATCH_SIZE) {
+            int remaining = lazy->count - DIR_BATCH_SIZE;
+            LazyLoadData *next = g_new0(LazyLoadData, 1);
+            next->count = remaining;
+            next->depth = lazy->depth;
+            g_strlcpy(next->dir_path, lazy->dir_path, sizeof(next->dir_path));
+            next->names = g_new(char *, remaining);
+            next->is_dirs = g_new(gboolean, remaining);
+            for (int i = 0; i < remaining; i++) {
+                next->names[i] = g_strdup(lazy->names[DIR_BATCH_SIZE + i]);
+                next->is_dirs[i] = lazy->is_dirs[DIR_BATCH_SIZE + i];
+            }
+
+            char indent[128] = "";
+            for (int d = 0; d < next->depth; d++) strcat(indent, "  ");
+            char lt[256];
+            snprintf(lt, sizeof(lt), "%s  ⋯ Show %d more…", indent, remaining);
+            GtkWidget *more_lbl = gtk_label_new(lt);
+            gtk_label_set_xalign(GTK_LABEL(more_lbl), 0);
+            gtk_widget_set_margin_start(more_lbl, 8);
+            gtk_widget_set_margin_end(more_lbl, 8);
+            gtk_widget_set_margin_top(more_lbl, 4);
+            gtk_widget_set_margin_bottom(more_lbl, 4);
+            gtk_widget_add_css_class(more_lbl, "dim-label");
+            g_object_set_data(G_OBJECT(more_lbl), "is-dir", GINT_TO_POINTER(FALSE));
+            g_object_set_data(G_OBJECT(more_lbl), "depth", GINT_TO_POINTER(next->depth));
+            g_object_set_data(G_OBJECT(more_lbl), "expanded", GINT_TO_POINTER(FALSE));
+            g_object_set_data_full(G_OBJECT(more_lbl), "lazy-load", next, lazy_load_data_free);
+            gtk_list_box_insert(win->file_list, more_lbl, row_idx + show);
+        }
+        update_file_status(win);
+        return;
+    }
 
     if (!full_path) return;
 
@@ -2280,7 +2492,7 @@ static void update_file_status(VibeWindow *win) {
 void vibe_window_disconnect_sftp(VibeWindow *win) {
     stop_dir_monitor(win);
     stop_file_monitor(win);
-    ssh_ctl_stop(win);
+    win_ssh_ctl_stop(win);
     win->ssh_host[0] = '\0';
     win->ssh_user[0] = '\0';
     win->ssh_port = 0;
@@ -2300,9 +2512,10 @@ static void on_sftp_disconnect_clicked(GtkButton *btn, gpointer data) {
 }
 
 static void update_cursor_label(VibeWindow *win) {
-    GtkTextMark *mark = gtk_text_buffer_get_insert(win->file_buffer);
+    GtkTextBuffer *fb = GTK_TEXT_BUFFER(win->file_buffer);
+    GtkTextMark *mark = gtk_text_buffer_get_insert(fb);
     GtkTextIter iter;
-    gtk_text_buffer_get_iter_at_mark(win->file_buffer, &iter, mark);
+    gtk_text_buffer_get_iter_at_mark(fb, &iter, mark);
     int line = gtk_text_iter_get_line(&iter) + 1;
     int col = gtk_text_iter_get_line_offset(&iter) + 1;
     char buf[128];
@@ -2344,6 +2557,19 @@ static void on_close_request(GtkWindow *window, gpointer data) {
     gtk_window_get_default_size(GTK_WINDOW(win->window), &w, &h);
     win->settings.window_width = w;
     win->settings.window_height = h;
+
+    /* Save session state */
+    g_strlcpy(win->settings.last_file, win->current_file, sizeof(win->settings.last_file));
+    win->settings.last_tab = gtk_notebook_get_current_page(win->notebook);
+
+    /* Save cursor position */
+    GtkTextBuffer *fb = GTK_TEXT_BUFFER(win->file_buffer);
+    GtkTextMark *mark = gtk_text_buffer_get_insert(fb);
+    GtkTextIter iter;
+    gtk_text_buffer_get_iter_at_mark(fb, &iter, mark);
+    win->settings.last_cursor_line = gtk_text_iter_get_line(&iter);
+    win->settings.last_cursor_col = gtk_text_iter_get_line_offset(&iter);
+
     settings_save(&win->settings);
 }
 
@@ -2363,7 +2589,7 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
 
     stop_dir_monitor(win);
     stop_file_monitor(win);
-    ssh_ctl_stop(win);
+    win_ssh_ctl_stop(win);
     if (win->intensity_idle_id) {
         g_source_remove(win->intensity_idle_id);
         win->intensity_idle_id = 0;
@@ -2374,6 +2600,8 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
             GTK_STYLE_PROVIDER(win->css_provider));
         g_object_unref(win->css_provider);
     }
+    if (win->git_status)
+        g_hash_table_destroy(win->git_status);
     g_object_unref(win->cancellable);
     g_free(win);
 }
@@ -2424,7 +2652,7 @@ static void remote_dir_populate(RemoteDirCtx *ctx) {
         gtk_list_box_append(ctx->dir_list, lbl);
     }
 
-    GPtrArray *av = ssh_argv_new(win);
+    GPtrArray *av = win_ssh_argv(win);
     g_ptr_array_add(av, g_strdup("--"));
     g_ptr_array_add(av, g_strdup("ls"));
     g_ptr_array_add(av, g_strdup("-1pA"));
@@ -2676,34 +2904,32 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     gtk_paned_set_start_child(GTK_PANED(paned), browser_box);
     gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
 
-    /* Right: line numbers + file viewer */
-    /* Line numbers (non-editable text view, synced scroll) */
-    win->line_numbers = GTK_TEXT_VIEW(gtk_text_view_new());
-    gtk_text_view_set_editable(win->line_numbers, FALSE);
-    gtk_text_view_set_cursor_visible(win->line_numbers, FALSE);
-    gtk_widget_set_can_focus(GTK_WIDGET(win->line_numbers), FALSE);
-    gtk_widget_add_css_class(GTK_WIDGET(win->line_numbers), "line-numbers");
-    gtk_text_view_set_right_margin(win->line_numbers, 8);
-    gtk_text_view_set_left_margin(win->line_numbers, 4);
-    gtk_text_view_set_top_margin(win->line_numbers, 8);
-    gtk_text_buffer_set_text(gtk_text_view_get_buffer(win->line_numbers), "1", -1);
-
-    /* File viewer (custom subclass for highlight drawing) */
-    VibeTextView *vtv = g_object_new(VIBE_TYPE_TEXT_VIEW, NULL);
-    vtv->win = win;
-    win->file_view = GTK_TEXT_VIEW(vtv);
-    win->file_buffer = gtk_text_view_get_buffer(win->file_view);
-    gtk_text_view_set_editable(win->file_view, TRUE);
-    gtk_text_view_set_cursor_visible(win->file_view, TRUE);
-    gtk_text_view_set_wrap_mode(win->file_view, GTK_WRAP_WORD_CHAR);
-    gtk_text_view_set_left_margin(win->file_view, 12);
-    gtk_text_view_set_right_margin(win->file_view, 12);
-    gtk_text_view_set_top_margin(win->file_view, 8);
+    /* Right: GtkSourceView file viewer (syntax highlighting, line numbers, current line) */
+    win->file_buffer = gtk_source_buffer_new(NULL);
+    win->file_view = GTK_SOURCE_VIEW(gtk_source_view_new_with_buffer(win->file_buffer));
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(win->file_view), TRUE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(win->file_view), TRUE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(win->file_view), GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(win->file_view), 12);
+    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(win->file_view), 12);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(win->file_view), 8);
     gtk_widget_add_css_class(GTK_WIDGET(win->file_view), "file-viewer");
 
-    /* Intensity tag for font opacity */
-    win->intensity_tag = gtk_text_buffer_create_tag(win->file_buffer, "intensity",
-                                                     "foreground-rgba", NULL, NULL);
+    /* GtkSourceView features */
+    gtk_source_view_set_show_line_numbers(win->file_view, win->settings.show_line_numbers);
+    gtk_source_view_set_highlight_current_line(win->file_view, win->settings.highlight_current_line);
+    gtk_source_view_set_tab_width(win->file_view, 4);
+    gtk_source_view_set_show_line_marks(win->file_view, FALSE);
+
+    /* Apply source style scheme matching the app theme */
+    GtkSourceStyleSchemeManager *ssm = gtk_source_style_scheme_manager_get_default();
+    GtkSourceStyleScheme *scheme = NULL;
+    if (is_dark_theme(win->settings.theme))
+        scheme = gtk_source_style_scheme_manager_get_scheme(ssm, "Adwaita-dark");
+    else
+        scheme = gtk_source_style_scheme_manager_get_scheme(ssm, "Adwaita");
+    if (scheme)
+        gtk_source_buffer_set_style_scheme(win->file_buffer, scheme);
 
     g_signal_connect(win->file_buffer, "changed", G_CALLBACK(on_file_buffer_changed), win);
 
@@ -2714,28 +2940,13 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     gtk_widget_add_controller(GTK_WIDGET(win->file_view), edit_key);
     g_signal_connect(win->file_buffer, "notify::cursor-position", G_CALLBACK(on_cursor_moved), win);
 
-    /* Scrolled windows */
+    /* Scrolled window */
     GtkWidget *viewer_scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(viewer_scroll), GTK_WIDGET(win->file_view));
     gtk_widget_set_vexpand(viewer_scroll, TRUE);
     gtk_widget_set_hexpand(viewer_scroll, TRUE);
 
-    win->ln_scrolled = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(win->ln_scrolled), GTK_WIDGET(win->line_numbers));
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(win->ln_scrolled),
-                                    GTK_POLICY_NEVER, GTK_POLICY_EXTERNAL);
-    gtk_widget_set_vexpand(win->ln_scrolled, TRUE);
-
-    /* Sync vertical scroll */
-    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(viewer_scroll));
-    gtk_scrolled_window_set_vadjustment(GTK_SCROLLED_WINDOW(win->ln_scrolled), vadj);
-
-    /* HBox: line numbers + viewer */
-    GtkWidget *viewer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_box_append(GTK_BOX(viewer_box), win->ln_scrolled);
-    gtk_box_append(GTK_BOX(viewer_box), viewer_scroll);
-
-    gtk_paned_set_end_child(GTK_PANED(paned), viewer_box);
+    gtk_paned_set_end_child(GTK_PANED(paned), viewer_scroll);
     gtk_paned_set_shrink_end_child(GTK_PANED(paned), FALSE);
 
     gtk_notebook_append_page(win->notebook, paned, gtk_label_new("Files"));
@@ -2889,6 +3100,39 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
         g_strlcpy(win->root_dir, win->settings.last_directory, sizeof(win->root_dir));
         vibe_window_set_root_directory(win, win->settings.last_directory);
     }
+
+    /* Restore session: last open file + cursor position */
+    if (win->settings.last_file[0] && !path_is_remote(win->settings.last_file)) {
+        /* Only restore local files (remote connections are not auto-restored) */
+        struct stat st;
+        if (stat(win->settings.last_file, &st) == 0 && S_ISREG(st.st_mode)) {
+            open_and_watch_file(win, win->settings.last_file);
+
+            /* Restore cursor position (deferred to allow async load to complete) */
+            if (win->settings.last_cursor_line > 0 || win->settings.last_cursor_col > 0) {
+                GtkTextBuffer *fb = GTK_TEXT_BUFFER(win->file_buffer);
+                GtkTextIter iter;
+                int line = win->settings.last_cursor_line;
+                int col = win->settings.last_cursor_col;
+                int total = gtk_text_buffer_get_line_count(fb);
+                if (line >= total) line = total - 1;
+                gtk_text_buffer_get_iter_at_line_offset(fb, &iter, line, 0);
+                /* move to column if valid */
+                int line_len = gtk_text_iter_get_chars_in_line(&iter);
+                if (col > 0 && col < line_len)
+                    gtk_text_iter_set_line_offset(&iter, col);
+                gtk_text_buffer_place_cursor(fb, &iter);
+
+                /* Scroll to cursor */
+                GtkTextMark *mark = gtk_text_buffer_get_insert(fb);
+                gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(win->file_view), mark, 0.1, FALSE, 0, 0);
+            }
+        }
+    }
+
+    /* Restore active tab */
+    if (win->settings.last_tab >= 0 && win->settings.last_tab <= 2)
+        gtk_notebook_set_current_page(win->notebook, win->settings.last_tab);
 
     gtk_window_present(GTK_WINDOW(win->window));
     return win;

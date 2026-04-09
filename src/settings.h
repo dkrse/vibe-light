@@ -24,6 +24,8 @@ typedef struct {
     gboolean show_line_numbers;
     gboolean highlight_current_line;
     gboolean wrap_lines;
+    int      show_gitignored;  /* 0=hide, 1=show gray */
+    gboolean show_hidden;      /* show dotfiles */
 
     /* Terminal */
     char terminal_font[256];
@@ -48,6 +50,21 @@ typedef struct {
     int window_width;
     int window_height;
     char last_directory[2048];
+
+    /* Session restore */
+    char last_file[4096];
+    int  last_cursor_line;
+    int  last_cursor_col;
+    int  last_tab;
+
+    /* Keybindings (GTK accelerator format, e.g. "<Control>o") */
+    char key_open_folder[64];
+    char key_zoom_in[64];
+    char key_zoom_out[64];
+    char key_tab_files[64];
+    char key_tab_terminal[64];
+    char key_tab_ai[64];
+    char key_quit[64];
 } VibeSettings;
 
 /* SFTP/SSH connections */
