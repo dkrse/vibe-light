@@ -39,7 +39,17 @@ A lightweight file browser, terminal, and AI assistant built with GTK4, libadwai
 ### Fedora (43+)
 
 ```bash
-sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel webkitgtk6.0-devel cmark-gfm-devel poppler-glib-devel gcc make pkgconf-pkg-config
+sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel webkitgtk6.0-devel poppler-glib-devel gcc make pkgconf-pkg-config cmake
+```
+
+Fedora does not package `cmark-gfm`. Build from source:
+
+```bash
+git clone https://github.com/github/cmark-gfm.git /tmp/cmark-gfm
+cd /tmp/cmark-gfm && mkdir build && cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local
+make && sudo make install
+sudo sh -c 'echo /usr/local/lib > /etc/ld.so.conf.d/local.conf' && sudo ldconfig
 ```
 
 ### Ubuntu / Debian

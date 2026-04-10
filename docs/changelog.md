@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.8.0 (2026-04-10)
+
+### Architecture
+
+- **Source split** -- `window.c` (~4640 lines) split into 4 modules for maintainability:
+  - `theme.c` (~154 lines) -- theme CSS, apply_theme, terminal colors, font intensity
+  - `editor.c` (~205 lines) -- file save, search, go to line, editor key handler
+  - `ai.c` (~863 lines) -- LaTeX→Unicode, markdown rendering, AI prompt/response, JSON parsing
+  - `window.c` (~3100 lines) -- file browser, git status, monitoring, window construction
+- **Dead code removed** -- ~520 lines of old `#if 0` GtkTextBuffer markdown renderer removed
+- **Debug output removed** -- 7 `fprintf(stderr)` debug statements removed from production code
+
+### Bug Fixes
+
+- **malloc NULL check** -- `insert_children()` now checks `malloc()` return for NULL before `memcpy()` (prevented potential segfault on allocation failure)
+- **strcat buffer overflow** -- 6 `strcat()` loops building indentation strings replaced with bounds-checked `build_indent()` function (prevented overflow with directory depth >63)
+- **LaTeX placeholder O(n²)** -- `ai_refresh_output()` replaced `strstr()`+`g_string_erase()`+`g_string_insert()` loop with single-pass scan using `strncmp()`/`strtoul()` (linear time instead of quadratic)
+- **strcpy unsafe** -- 2 `strcpy()` calls in remote directory chooser replaced with `g_strlcpy()`
+- **strncpy unsafe** -- 2 `strncpy()` calls replaced with `g_strlcpy()` (guaranteed NUL termination)
+- **Format truncation warnings** -- toast and title strings now use `g_strdup_printf()` instead of fixed-size `snprintf()` buffers; path construction buffers increased where needed
+- **Zero compiler warnings** -- all `-Wformat-truncation` and `-Wcomment` warnings resolved
+
+### Fedora 43 Support
+
+- **cmark-gfm** -- documented that Fedora does not package `cmark-gfm-devel`; added build-from-source instructions in README and docs/dependencies.md
+- **ldconfig** -- documented `/usr/local/lib` registration for dynamic linker
+
 ## v0.7.0 (2026-04-10)
 
 ### Features

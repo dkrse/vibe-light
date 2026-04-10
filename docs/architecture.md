@@ -22,36 +22,45 @@ Vibe Light is a lightweight GTK4/libadwaita desktop application written in C17. 
 ```
 src/
   main.c         (~16 lines)     Entry point, AdwApplication setup
-  window.h       (~105 lines)    VibeWindow struct, public API
-  window.c       (~3500 lines)   Window construction, themes, file browser,
+  window.h       (~115 lines)    VibeWindow struct, public API
+  window.c       (~3100 lines)   Window construction, apply_settings,
+                                  file browser, git status integration,
+                                  lazy loading, async file loading,
                                   file system monitoring (local + remote),
-                                  git status integration, lazy loading,
-                                  async file loading, syntax highlighting,
-                                  font intensity, file editing + save,
-                                  search (Ctrl+F), go to line (Ctrl+G),
-                                  undo/redo, context menu (rename/delete/new),
-                                  drag & drop, markdown rendering,
-                                  toast notifications, AI assistant,
+                                  context menu (rename/delete/new),
+                                  drag & drop, toast notifications,
                                   session restore, remote dir chooser,
-                                  prompt handler, terminal spawn
-  ssh.h          (~90 lines)     SSH utility declarations, poll context structs
-  ssh.c          (~270 lines)    SSH transport: argv builders, ControlMaster,
+                                  terminal spawn, status bar
+  theme.h        (~23 lines)     Theme definitions, declarations
+  theme.c        (~154 lines)    Theme CSS generation, apply_theme,
+                                  terminal colors, font intensity
+  editor.h       (~17 lines)     Editor function declarations
+  editor.c       (~205 lines)    File save, search (Ctrl+F),
+                                  go to line (Ctrl+G), undo/redo,
+                                  editor key handler
+  ai.h           (~15 lines)     AI assistant declarations
+  ai.c           (~863 lines)    LaTeX to Unicode conversion,
+                                  markdown rendering (cmark-gfm + WebKit),
+                                  AI prompt/response handling, JSON parsing,
+                                  session management, token tracking
+  ssh.h          (~99 lines)     SSH utility declarations, poll context structs
+  ssh.c          (~316 lines)    SSH transport: argv builders, ControlMaster,
                                   spawn_sync, cat_file, dir/file poll threads,
                                   inotify check thread, djb2 hash
   prompt_log.h   (~30 lines)     Prompt logging API declarations
-  prompt_log.c   (~170 lines)    JSON conversation log: input/output entries
+  prompt_log.c   (~196 lines)    JSON conversation log: input/output entries
                                   with model, session, tokens, timestamps
-  settings.h     (~85 lines)     VibeSettings + SftpConnection structs
-  settings.c     (~310 lines)    Load/save config and connections, locale-safe
+  settings.h     (~113 lines)    VibeSettings + SftpConnection structs
+  settings.c     (~388 lines)    Load/save config and connections, locale-safe
   actions.h      (~8 lines)      Action setup declaration
-  actions.c      (~1500 lines)   Open folder, zoom (per-section), tab switch,
+  actions.c      (~1769 lines)   Open folder, zoom (per-section), tab switch,
                                   quit, Settings dialog (7 tabs incl. PDF),
                                   SFTP dialog (multi-connection), AI model
                                   dialog (session resume), PDF export with
                                   poppler page numbers, async SSH connect
 ```
 
-Total: ~5500 lines of C.
+Total: ~7400 lines of C (9 source files + 7 headers).
 
 ## Key Data Structures
 
@@ -427,8 +436,11 @@ INI-style sections at `~/.config/vibe-light/connections.conf`.
 
 ## Memory Safety
 
-- `g_strlcpy` used throughout (guarantees NUL termination)
+- `g_strlcpy` used throughout (guarantees NUL termination) -- no `strcpy` or bare `strncpy` in codebase
+- `malloc` return values checked for NULL (graceful cleanup on allocation failure)
 - `realloc` checked for NULL (falls back gracefully)
+- Indentation strings built via bounds-checked `build_indent()` (prevents buffer overflow with deep directory trees)
+- Toast/title strings use `g_strdup_printf` (no fixed-size buffer truncation)
 - `GSubprocess` for binary-safe SSH file reading
 - `GTask` for async operations (prevents use-after-free on dialog close)
 - `GCancellable` shared across all async operations -- cancelled on window destroy, all callbacks check before accessing `VibeWindow`

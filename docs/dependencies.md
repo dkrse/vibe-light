@@ -36,7 +36,23 @@
 ### Fedora (43+)
 
 ```bash
-sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel webkitgtk6.0-devel cmark-gfm-devel poppler-glib-devel gcc make pkgconf-pkg-config
+sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel webkitgtk6.0-devel poppler-glib-devel gcc make pkgconf-pkg-config cmake
+```
+
+Fedora does not package `cmark-gfm` (only standard `cmark` without GFM extensions). Build from source:
+
+```bash
+git clone https://github.com/github/cmark-gfm.git /tmp/cmark-gfm
+cd /tmp/cmark-gfm && mkdir build && cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local
+make && sudo make install
+sudo sh -c 'echo /usr/local/lib > /etc/ld.so.conf.d/local.conf' && sudo ldconfig
+```
+
+This installs `libcmark-gfm.so` and `libcmark-gfm-extensions.so` to `/usr/local/lib` and registers them with the dynamic linker. If `pkg-config --libs libcmark-gfm` does not find the library after install, set:
+
+```bash
+export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
 ```
 
 For SFTP support (usually pre-installed):
@@ -64,6 +80,7 @@ The Makefile includes security hardening flags:
 - `-fstack-protector-strong` -- stack buffer overflow protection
 - `-fPIE` / `-pie` -- position independent executable (ASLR)
 - `-D_FORTIFY_SOURCE=2` -- runtime bounds checking for string/memory functions
+- `-Wall -Wextra` -- all warnings enabled, zero warnings in build
 
 ## Notes
 
@@ -75,3 +92,4 @@ The Makefile includes security hardening flags:
 - Git status detection uses the system `git` command. If git is not installed or the directory is not a git repo, status indicators are simply not shown.
 - GtkSourceView language detection uses `g_content_type_guess()` for files without extensions (Makefile, Dockerfile, etc.).
 - Configuration files are stored in `~/.config/vibe-light/` with `0600` permissions.
+- **Fedora note:** `cmark-gfm` is not available as a Fedora package (only standard `cmark` without GFM table/strikethrough/autolink extensions). Must be built from source and installed to `/usr/local`. The Makefile uses `pkg-config --libs libcmark-gfm` which works on both Debian (system package) and Fedora (source install to `/usr/local`).

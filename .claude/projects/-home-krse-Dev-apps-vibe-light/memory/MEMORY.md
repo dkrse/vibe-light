@@ -1,0 +1,1 @@
+- [User profile](user_profile.md) — solo dev, 1-week projects replacing 5-8 month team efforts
