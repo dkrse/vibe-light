@@ -13,8 +13,9 @@ A lightweight file browser, terminal, and AI assistant built with GTK4, libadwai
 - **AI Assistant** -- Send prompts to Claude CLI, view responses in WebKitWebView with full HTML markdown rendering, token tracking
 - **SFTP/SSH** -- Browse remote directories and view remote files via SSH, save multiple connection profiles
 - **13 Themes** -- System, Light, Dark, Solarized, Monokai, Gruvbox, Nord, Dracula, Tokyo Night, Catppuccin
-- **Per-section Fonts** -- Independent font settings for GUI, File Browser, Editor, Terminal, and Prompt
-- **Global Font Intensity** -- Single intensity control affecting all text with live preview
+- **Per-section Fonts** -- Independent font settings for GUI, File Browser, Editor, Terminal, AI Model, and Prompt
+- **Per-section Font Intensity** -- Independent intensity control (0.3-1.0) for each section with live preview
+- **PDF Export** -- Save as PDF via Menu or Ctrl+P with configurable margins, landscape, and page numbers (n or n/total) rendered via poppler+cairo
 - **Session Restore** -- Remembers last open file, cursor position, and active tab
 - **Configurable Keybindings** -- Customize keyboard shortcuts via settings
 - **Lazy Loading** -- Large directories load in batches of 500 for smooth UI
@@ -31,25 +32,26 @@ A lightweight file browser, terminal, and AI assistant built with GTK4, libadwai
 - VTE (vte-2.91-gtk4)
 - WebKitGTK 6.0 (for AI markdown rendering)
 - cmark-gfm (GitHub-Flavored Markdown parser)
+- poppler-glib (PDF page number rendering)
 - GCC, Make, pkg-config
 - OpenSSH client (for SFTP, usually pre-installed)
 
 ### Fedora (43+)
 
 ```bash
-sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel webkitgtk6.0-devel cmark-gfm-devel gcc make pkgconf-pkg-config
+sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel webkitgtk6.0-devel cmark-gfm-devel poppler-glib-devel gcc make pkgconf-pkg-config
 ```
 
 ### Ubuntu / Debian
 
 ```bash
-sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev libwebkitgtk-6.0-dev libcmark-gfm-dev gcc make pkg-config
+sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev libwebkitgtk-6.0-dev libcmark-gfm-dev libpoppler-glib-dev gcc make pkg-config
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S gtk4 libadwaita vte4 gtksourceview5 webkit2gtk-5.0 cmark-gfm gcc make pkg-config
+sudo pacman -S gtk4 libadwaita vte4 gtksourceview5 webkit2gtk-5.0 cmark-gfm poppler-glib gcc make pkg-config
 ```
 
 See [docs/dependencies.md](docs/dependencies.md) for full details.
@@ -78,8 +80,9 @@ All shortcuts are configurable via `settings.conf`.
 | Ctrl+Z | Undo | -- |
 | Ctrl+Shift+Z / Ctrl+Y | Redo | -- |
 | Ctrl+O | Open folder | `key_open_folder` |
-| Ctrl+Plus / Ctrl+= | Zoom in | `key_zoom_in` |
-| Ctrl+Minus | Zoom out | `key_zoom_out` |
+| Ctrl+Plus / Ctrl+= | Zoom in (active section only) | `key_zoom_in` |
+| Ctrl+Minus | Zoom out (active section only) | `key_zoom_out` |
+| Ctrl+P | Print / Save as PDF | `key_print_pdf` |
 | Alt+1 | Switch to Files tab | `key_tab_files` |
 | Alt+2 | Switch to Terminal tab | `key_tab_terminal` |
 | Alt+3 | Switch to AI tab | `key_tab_ai` |
@@ -135,7 +138,8 @@ Built-in integration with Claude CLI (`claude` command):
 - **Full HTML markdown rendering** -- WebKitWebView with cmark-gfm: tables, code blocks, headings, bold, italic, links, blockquotes, lists, horizontal rules
 - **LaTeX to Unicode** -- math expressions like `$E = mc^2$` rendered as `E = mc²`, `$\sum$` as `∑`
 - **Theme-aware** -- AI output follows app theme (dark/light CSS)
-- Session continuity via `--resume`
+- Session continuity via `--resume` with automatic session persistence across restarts
+- **Session auto-recovery** -- if a saved session expires, automatically retries with a new session
 - Token usage tracking (input/output/total)
 - Configurable tool access (Read, Edit, Write, Glob, Grep, Bash)
 - Optional CWD restriction for security
@@ -157,11 +161,12 @@ Prompts and responses are logged to `{project}/.LLM/prompts.json`:
 | Tab | Options |
 |-----|---------|
 | GUI | Theme, Font, Font Intensity |
-| File Browser | Font, Show Hidden Files, Gitignored Files (Hide/Show gray) |
-| Editor | Font, Font Weight, Line Spacing, Line Numbers, Highlight Line, Wrap Lines |
-| Terminal | Font |
+| File Browser | Font, Font Intensity, Show Hidden Files, Gitignored Files (Hide/Show gray) |
+| Editor | Font, Font Intensity, Font Weight, Line Spacing, Line Numbers, Highlight Line, Wrap Lines |
+| Terminal | Font, Font Intensity |
 | Prompt | Font, Send with (Ctrl+Enter/Enter), Show Terminal after send |
-| AI Model | Full Disk Access, Tool toggles |
+| AI Model | Font, Font Intensity, Full Disk Access, Tool toggles, Session resume |
+| PDF | Left/Right/Top/Bottom margins (mm), Landscape, Page numbers (None/n/n÷total) |
 
 ## Configuration
 

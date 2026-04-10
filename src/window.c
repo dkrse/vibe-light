@@ -166,7 +166,7 @@ static void apply_terminal_colors(VibeWindow *win) {
     GdkRGBA fg, bg;
     gdk_rgba_parse(&fg, fg_hex);
     gdk_rgba_parse(&bg, bg_hex);
-    fg.alpha = win->settings.font_intensity;
+    fg.alpha = win->settings.terminal_font_intensity;
     vte_terminal_set_color_foreground(win->terminal, &fg);
     vte_terminal_set_color_background(win->terminal, &bg);
     vte_terminal_set_color_cursor(win->terminal, &fg);
@@ -187,7 +187,7 @@ static gboolean is_dark_theme(const char *theme) {
 }
 
 static void apply_font_intensity(VibeWindow *win) {
-    double alpha = win->settings.font_intensity;
+    double alpha = win->settings.editor_font_intensity;
 
     /* For the source view (file viewer), use CSS opacity to preserve syntax colors */
     /* The opacity is applied via the font_css in vibe_window_apply_settings */
@@ -225,12 +225,13 @@ static gboolean intensity_idle_cb(gpointer data) {
     VibeWindow *win = data;
     win->intensity_idle_id = 0;
     /* Only prompt needs per-buffer tag intensity; file viewer uses CSS opacity */
-    if (win->settings.font_intensity < 0.99)
+    if (win->settings.editor_font_intensity < 0.99)
         apply_font_intensity(win);
     return G_SOURCE_REMOVE;
 }
 
 static void update_status_bar(VibeWindow *win);
+static void update_status_bar_page(VibeWindow *win, int page);
 
 static void on_cursor_moved(GtkTextBuffer *buffer, GParamSpec *pspec, gpointer data) {
     (void)buffer; (void)pspec;
@@ -241,14 +242,14 @@ static void on_cursor_moved(GtkTextBuffer *buffer, GParamSpec *pspec, gpointer d
 static void on_file_buffer_changed(GtkTextBuffer *buffer, gpointer data) {
     (void)buffer;
     VibeWindow *win = data;
-    if (win->settings.font_intensity < 0.99 && win->intensity_idle_id == 0)
+    if (win->settings.editor_font_intensity < 0.99 && win->intensity_idle_id == 0)
         win->intensity_idle_id = g_idle_add(intensity_idle_cb, win);
 }
 
 static void on_prompt_buffer_changed(GtkTextBuffer *buffer, gpointer data) {
     (void)buffer;
     VibeWindow *win = data;
-    if (win->settings.font_intensity < 0.99) {
+    if (win->settings.editor_font_intensity < 0.99) {
         GtkTextIter ps, pe;
         gtk_text_buffer_get_bounds(win->prompt_buffer, &ps, &pe);
         gtk_text_buffer_apply_tag(win->prompt_buffer, win->prompt_intensity_tag, &ps, &pe);
@@ -291,7 +292,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
     gtk_source_view_set_highlight_current_line(win->file_view, win->settings.highlight_current_line);
 
     /* Editor font intensity via widget opacity */
-    gtk_widget_set_opacity(GTK_WIDGET(win->file_view), win->settings.font_intensity);
+    gtk_widget_set_opacity(GTK_WIDGET(win->file_view), win->settings.editor_font_intensity);
 
     /* Update source style scheme to match theme */
     GtkSourceStyleSchemeManager *ssm = gtk_source_style_scheme_manager_get_default();
@@ -306,8 +307,9 @@ void vibe_window_apply_settings(VibeWindow *win) {
     /* font intensity (editor) */
     apply_font_intensity(win);
 
-    /* terminal colors */
+    /* terminal colors + intensity */
     apply_terminal_colors(win);
+    gtk_widget_set_opacity(GTK_WIDGET(win->terminal), win->settings.terminal_font_intensity);
 
     /* CSS: theme + per-section fonts */
     char theme_css[4096] = "";
@@ -322,9 +324,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
         build_theme_css(theme_css, sizeof(theme_css), td->fg, td->bg);
     }
 
-    double alpha = win->settings.font_intensity;
-
-    /* compute rgba color string for intensity */
+    /* compute rgba color strings for per-section intensity */
     const char *fg_hex = NULL;
     for (size_t i = 0; i < N_CUSTOM_THEMES; i++) {
         if (strcmp(win->settings.theme, custom_themes[i].id) == 0) {
@@ -340,12 +340,20 @@ void vibe_window_apply_settings(VibeWindow *win) {
     int r = (int)(fg_rgba.red * 255);
     int g = (int)(fg_rgba.green * 255);
     int b = (int)(fg_rgba.blue * 255);
-    int a_full = (int)(alpha * 100);
-    int a_dim = (int)(alpha * 30);
-    char fg_full[64], fg_dim[64];
-    /* use integer math to avoid locale comma in decimals */
-    snprintf(fg_full, sizeof(fg_full), "rgba(%d,%d,%d,0.%02d)", r, g, b, a_full);
-    snprintf(fg_dim, sizeof(fg_dim), "rgba(%d,%d,%d,0.%02d)", r, g, b, a_dim);
+
+    /* locale-safe rgba helper: alpha 1.0 → "1", else "0.XX" */
+    #define MAKE_RGBA(buf, alpha) do { \
+        if ((alpha) >= 0.995) \
+            snprintf(buf, sizeof(buf), "rgba(%d,%d,%d,1)", r, g, b); \
+        else \
+            snprintf(buf, sizeof(buf), "rgba(%d,%d,%d,0.%02d)", r, g, b, (int)((alpha)*100)); \
+    } while(0)
+
+    char fg_gui[64], fg_browser[64], fg_editor[64];
+    MAKE_RGBA(fg_gui, win->settings.gui_font_intensity);
+    MAKE_RGBA(fg_browser, win->settings.browser_font_intensity);
+    MAKE_RGBA(fg_editor, win->settings.editor_font_intensity);
+    #undef MAKE_RGBA
 
     char font_css[8192];
     snprintf(font_css, sizeof(font_css),
@@ -363,7 +371,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
              ".file-browser{font-family:%s;font-size:%dpt;}"
              ".file-browser label{color:%s;}"
              ".prompt-view{font-family:%s;font-size:%dpt;caret-color:%s;}"
-             /* colors */
+             /* colors — GUI intensity for chrome elements */
              ".path-bar{color:%s;}"
              ".statusbar label{color:%s;}"
              "headerbar{color:%s;}"
@@ -382,20 +390,20 @@ void vibe_window_apply_settings(VibeWindow *win) {
              win->settings.gui_font, win->settings.gui_font_size,
              win->settings.gui_font, win->settings.gui_font_size,
              /* per-section font args */
-             win->settings.editor_font, win->settings.editor_font_size, win->settings.editor_font_weight, fg_full,
+             win->settings.editor_font, win->settings.editor_font_size, win->settings.editor_font_weight, fg_editor,
              win->settings.browser_font, win->settings.browser_font_size,
-             fg_full,
-             win->settings.prompt_font, win->settings.prompt_font_size, fg_full,
-             /* color args */
-             fg_full,
-             fg_full,
-             fg_full,
-             fg_full,
-             fg_full,
-             fg_full,
-             fg_full,
-             fg_full,
-             fg_full);
+             fg_browser,
+             win->settings.prompt_font, win->settings.prompt_font_size, fg_editor,
+             /* color args — GUI intensity */
+             fg_gui,
+             fg_gui,
+             fg_gui,
+             fg_gui,
+             fg_gui,
+             fg_gui,
+             fg_gui,
+             fg_gui,
+             fg_gui);
 
     char *full_css = g_strconcat(theme_css, font_css, NULL);
     gtk_css_provider_load_from_string(win->css_provider, full_css);
@@ -1885,9 +1893,7 @@ static void file_load_done(GObject *src, GAsyncResult *res, gpointer data) {
 
     /* Reset modified state and update title */
     win->file_modified = FALSE;
-    const char *base = strrchr(ctx->filepath, '/');
-    base = base ? base + 1 : ctx->filepath;
-    gtk_window_set_title(GTK_WINDOW(win->window), base);
+    update_status_bar(win);
 
     g_free(ctx->contents);
     g_free(ctx);
@@ -2411,14 +2417,12 @@ static void save_current_file(VibeWindow *win) {
     GError *err = NULL;
     if (g_file_set_contents(win->current_file, text, -1, &err)) {
         win->file_modified = FALSE;
-        const char *base = strrchr(win->current_file, '/');
-        base = base ? base + 1 : win->current_file;
-        char title[256];
-        snprintf(title, sizeof(title), "%s", base);
-        gtk_window_set_title(GTK_WINDOW(win->window), title);
+        update_status_bar(win);
 
+        const char *bname = strrchr(win->current_file, '/');
+        bname = bname ? bname + 1 : win->current_file;
         char msg[300];
-        snprintf(msg, sizeof(msg), "Saved %s", base);
+        snprintf(msg, sizeof(msg), "Saved %s", bname);
         vibe_toast(win, msg);
     } else {
         char msg[512];
@@ -2435,11 +2439,7 @@ static void on_file_modified_changed(GtkTextBuffer *buffer, gpointer data) {
     if (!win->current_file[0]) return;
 
     win->file_modified = TRUE;
-    const char *base = strrchr(win->current_file, '/');
-    base = base ? base + 1 : win->current_file;
-    char title[256];
-    snprintf(title, sizeof(title), "%s [modified]", base);
-    gtk_window_set_title(GTK_WINDOW(win->window), title);
+    update_status_bar(win);
 }
 
 /* ── Search callbacks ── */
@@ -2844,7 +2844,7 @@ static char *latex_to_unicode(const char *latex) {
         {"\\cup", "∪"}, {"\\cap", "∩"},
         {"\\cdot", "·"}, {"\\ldots", "…"}, {"\\cdots", "⋯"},
         {"\\sqrt", "√"}, {"\\langle", "⟨"}, {"\\rangle", "⟩"},
-        {"\\frac", "/"}, {"\\to", "→"},
+        {"\\to", "→"},
     };
     /* Superscript/subscript digit maps */
     static const char *sup_digits[] = {"⁰","¹","²","³","⁴","⁵","⁶","⁷","⁸","⁹"};
@@ -2858,6 +2858,70 @@ static char *latex_to_unicode(const char *latex) {
         if (strncmp(p, "\\left", 5) == 0) { p += 5; continue; }
         if (strncmp(p, "\\right", 6) == 0) { p += 6; continue; }
 
+        /* \frac{num}{den} — render as (num)/(den) */
+        if (strncmp(p, "\\frac{", 6) == 0) {
+            p += 5; /* skip \frac, land on { */
+            /* Extract numerator */
+            p++; /* skip { */
+            int depth = 1;
+            const char *start = p;
+            while (*p && depth > 0) {
+                if (*p == '{') depth++;
+                else if (*p == '}') depth--;
+                if (depth > 0) p++;
+            }
+            char *num = g_strndup(start, (gsize)(p - start));
+            if (*p == '}') p++;
+            /* Extract denominator */
+            char *den = NULL;
+            if (*p == '{') {
+                p++;
+                depth = 1;
+                start = p;
+                while (*p && depth > 0) {
+                    if (*p == '{') depth++;
+                    else if (*p == '}') depth--;
+                    if (depth > 0) p++;
+                }
+                den = g_strndup(start, (gsize)(p - start));
+                if (*p == '}') p++;
+            }
+            char *num_r = latex_to_unicode(num);
+            g_string_append_c(out, '(');
+            g_string_append(out, num_r);
+            g_string_append_c(out, ')');
+            if (den) {
+                char *den_r = latex_to_unicode(den);
+                g_string_append_c(out, '/');
+                g_string_append_c(out, '(');
+                g_string_append(out, den_r);
+                g_string_append_c(out, ')');
+                g_free(den_r);
+                g_free(den);
+            }
+            g_free(num_r);
+            g_free(num);
+            continue;
+        }
+        /* \text{...} and \mathrm{...} — render contents as plain text */
+        if ((strncmp(p, "\\text{", 6) == 0) ||
+            (strncmp(p, "\\mathrm{", 8) == 0) ||
+            (strncmp(p, "\\textbf{", 8) == 0) ||
+            (strncmp(p, "\\mathbf{", 8) == 0)) {
+            const char *open = strchr(p, '{');
+            p = open + 1;
+            /* Find matching closing brace (handle nesting) */
+            int depth = 1;
+            const char *start = p;
+            while (*p && depth > 0) {
+                if (*p == '{') depth++;
+                else if (*p == '}') depth--;
+                if (depth > 0) p++;
+            }
+            g_string_append_len(out, start, (gssize)(p - start));
+            if (*p == '}') p++;
+            continue;
+        }
         /* Check LaTeX commands */
         if (*p == '\\' && g_ascii_isalpha(p[1])) {
             gboolean found = FALSE;
@@ -2885,31 +2949,47 @@ static char *latex_to_unicode(const char *latex) {
             const char *content; size_t clen;
             if (*p == '{') {
                 p++;
-                const char *end = strchr(p, '}');
-                if (!end) break;
-                content = p; clen = (size_t)(end - p);
-                p = end + 1;
+                /* Find matching '}' with nesting */
+                int depth = 1;
+                const char *start = p;
+                while (*p && depth > 0) {
+                    if (*p == '{') depth++;
+                    else if (*p == '}') depth--;
+                    if (depth > 0) p++;
+                }
+                content = start; clen = (size_t)(p - start);
+                if (*p == '}') p++;
             } else {
                 content = p; clen = 1; p++;
             }
-            for (size_t i = 0; i < clen; i++) {
-                char c = content[i];
-                if (c >= '0' && c <= '9')
-                    g_string_append(out, sup_digits[(int)(c - '0')]);
-                else if (c >= 'a' && c <= 'z') {
-                    const char *s = g_utf8_offset_to_pointer(sup_letters, c - 'a');
-                    if (s && *s != ' ')
-                        g_string_append_len(out, s, (gssize)(g_utf8_next_char(s) - s));
-                    else
-                        g_string_append_c(out, c);
+            /* Check for \text{} inside — render as plain text */
+            char *inner = g_strndup(content, clen);
+            if (strstr(inner, "\\text") || strstr(inner, "\\mathrm")) {
+                char *plain = latex_to_unicode(inner);
+                g_string_append(out, plain);
+                g_free(plain);
+            } else {
+                for (size_t i = 0; i < clen; i++) {
+                    char c = inner[i];
+                    if (c >= '0' && c <= '9')
+                        g_string_append(out, sup_digits[(int)(c - '0')]);
+                    else if (c >= 'a' && c <= 'z') {
+                        const char *s = g_utf8_offset_to_pointer(sup_letters, c - 'a');
+                        if (s && *s != ' ')
+                            g_string_append_len(out, s, (gssize)(g_utf8_next_char(s) - s));
+                        else
+                            g_string_append_c(out, c);
+                    }
+                    else if (c == '+') g_string_append(out, "⁺");
+                    else if (c == '-') g_string_append(out, "⁻");
+                    else if (c == '=') g_string_append(out, "⁼");
+                    else if (c == '(') g_string_append(out, "⁽");
+                    else if (c == ')') g_string_append(out, "⁾");
+                    else if (c == '{' || c == '}') { /* skip braces */ }
+                    else g_string_append_c(out, c);
                 }
-                else if (c == '+') g_string_append(out, "⁺");
-                else if (c == '-') g_string_append(out, "⁻");
-                else if (c == '=') g_string_append(out, "⁼");
-                else if (c == '(') g_string_append(out, "⁽");
-                else if (c == ')') g_string_append(out, "⁾");
-                else g_string_append_c(out, c);
             }
+            g_free(inner);
             continue;
         }
         /* Subscript: _X or _{...} */
@@ -2918,31 +2998,47 @@ static char *latex_to_unicode(const char *latex) {
             const char *content; size_t clen;
             if (*p == '{') {
                 p++;
-                const char *end = strchr(p, '}');
-                if (!end) break;
-                content = p; clen = (size_t)(end - p);
-                p = end + 1;
+                /* Find matching '}' with nesting */
+                int depth = 1;
+                const char *start = p;
+                while (*p && depth > 0) {
+                    if (*p == '{') depth++;
+                    else if (*p == '}') depth--;
+                    if (depth > 0) p++;
+                }
+                content = start; clen = (size_t)(p - start);
+                if (*p == '}') p++;
             } else {
                 content = p; clen = 1; p++;
             }
-            for (size_t i = 0; i < clen; i++) {
-                char c = content[i];
-                if (c >= '0' && c <= '9')
-                    g_string_append(out, sub_digits[(int)(c - '0')]);
-                else if (c >= 'a' && c <= 'z') {
-                    const char *s = g_utf8_offset_to_pointer(sub_letters, c - 'a');
-                    if (s && *s != ' ')
-                        g_string_append_len(out, s, (gssize)(g_utf8_next_char(s) - s));
-                    else
-                        g_string_append_c(out, c);
+            /* Check for \text{} inside — render as plain text */
+            char *inner = g_strndup(content, clen);
+            if (strstr(inner, "\\text") || strstr(inner, "\\mathrm")) {
+                char *plain = latex_to_unicode(inner);
+                g_string_append(out, plain);
+                g_free(plain);
+            } else {
+                for (size_t i = 0; i < clen; i++) {
+                    char c = inner[i];
+                    if (c >= '0' && c <= '9')
+                        g_string_append(out, sub_digits[(int)(c - '0')]);
+                    else if (c >= 'a' && c <= 'z') {
+                        const char *s = g_utf8_offset_to_pointer(sub_letters, c - 'a');
+                        if (s && *s != ' ')
+                            g_string_append_len(out, s, (gssize)(g_utf8_next_char(s) - s));
+                        else
+                            g_string_append_c(out, c);
+                    }
+                    else if (c == '+') g_string_append(out, "₊");
+                    else if (c == '-') g_string_append(out, "₋");
+                    else if (c == '=') g_string_append(out, "₌");
+                    else if (c == '(') g_string_append(out, "₍");
+                    else if (c == ')') g_string_append(out, "₎");
+                    else if (c == '{' || c == '}') { /* skip braces */ }
+                    else g_string_append_c(out, c);
                 }
-                else if (c == '+') g_string_append(out, "₊");
-                else if (c == '-') g_string_append(out, "₋");
-                else if (c == '=') g_string_append(out, "₌");
-                else if (c == '(') g_string_append(out, "₍");
-                else if (c == ')') g_string_append(out, "₎");
-                else g_string_append_c(out, c);
             }
+            g_free(inner);
             continue;
         }
         /* Skip braces, spaces pass through */
@@ -3105,6 +3201,10 @@ static void ai_refresh_output(VibeWindow *win) {
         "<meta charset='utf-8'>"
         "<style>");
     g_string_append(html, is_dark ? ai_webview_css_dark : ai_webview_css_light);
+    /* Override font-size from settings */
+    /* Override font-size and opacity from settings */
+    g_string_append_printf(html, " body { font-size: %dpx !important; opacity: %.2f !important; }",
+                           win->settings.ai_font_size, win->settings.ai_font_intensity);
     g_string_append(html, "</style></head><body>");
 
     if (win->ai_conversation_md->len > 0) {
@@ -3268,22 +3368,26 @@ static void ai_parse_and_display(VibeWindow *win) {
         if (se && (se - sp) < 127) {
             memcpy(win->ai_session_id, sp, se - sp);
             win->ai_session_id[se - sp] = '\0';
+            /* Persist session ID for resume after restart */
+            g_strlcpy(win->settings.ai_last_session, win->ai_session_id,
+                       sizeof(win->settings.ai_last_session));
+            settings_save(&win->settings);
         }
     }
 
-    /* Extract model name for status */
+    /* Extract model name for status — keep previous if not found */
     const char *mu = strstr(json, "\"modelUsage\":{\"");
-    char model[128] = "unknown";
     if (mu) {
         mu += strlen("\"modelUsage\":{\"");
         const char *me = strchr(mu, '"');
+        char model[128];
         if (me && (me - mu) < 127) {
             memcpy(model, mu, me - mu);
             model[me - mu] = '\0';
+            gtk_label_set_text(win->ai_status_label, model);
         }
     }
-
-    gtk_label_set_text(win->ai_status_label, model);
+    update_status_bar(win);
 
     /* Compute elapsed time */
     gint64 now = g_get_monotonic_time();
@@ -3333,8 +3437,9 @@ static void ai_parse_and_display(VibeWindow *win) {
 
     /* Log prompt (input) + response (output) to JSON — both with correct model/session */
     const char *log_session = win->ai_session_id[0] ? win->ai_session_id : NULL;
+    const char *log_model = gtk_label_get_text(win->ai_status_label);
     if (win->ai_last_prompt) {
-        prompt_log_input(win->root_dir, log_session, model, win->ai_last_prompt);
+        prompt_log_input(win->root_dir, log_session, log_model, win->ai_last_prompt);
         g_free(win->ai_last_prompt);
         win->ai_last_prompt = NULL;
     }
@@ -3344,19 +3449,22 @@ static void ai_parse_and_display(VibeWindow *win) {
     const char *ot2 = strstr(json, "\"outputTokens\":");
     if (it2) req_in = atoi(it2 + 14);
     if (ot2) req_out = atoi(ot2 + 15);
-    prompt_log_output(win->root_dir, log_session, model,
+    prompt_log_output(win->root_dir, log_session, log_model,
                       result_for_log, req_in, req_out,
                       win->ai_last_elapsed);
     g_free(result_for_log);
 }
 
 /* Called when claude process finishes and all stdout is available */
+static void send_prompt_to_ai(VibeWindow *win);
+
 static void on_ai_communicate_done(GObject *src, GAsyncResult *res, gpointer data) {
     VibeWindow *win = data;
     GBytes *stdout_bytes = NULL;
+    GBytes *stderr_bytes = NULL;
     GError *err = NULL;
 
-    g_subprocess_communicate_finish(G_SUBPROCESS(src), res, &stdout_bytes, NULL, &err);
+    g_subprocess_communicate_finish(G_SUBPROCESS(src), res, &stdout_bytes, &stderr_bytes, &err);
 
     /* Stop elapsed timer */
     if (win->ai_timer_id) {
@@ -3364,21 +3472,126 @@ static void on_ai_communicate_done(GObject *src, GAsyncResult *res, gpointer dat
         win->ai_timer_id = 0;
     }
 
+    if (!win->ai_conversation_md)
+        win->ai_conversation_md = g_string_new(NULL);
+
+    if (err) {
+        /* Communication error (cancelled, pipe broken, etc.) */
+        if (g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+            g_string_append(win->ai_conversation_md, "\n\n**Cancelled.**\n\n");
+        else
+            g_string_append_printf(win->ai_conversation_md, "\n\n**Error:** %s\n\n", err->message);
+        ai_refresh_output(win);
+        gtk_label_set_text(win->ai_status_label, "error");
+        update_status_bar(win);
+        g_error_free(err);
+        if (stdout_bytes) g_bytes_unref(stdout_bytes);
+        if (stderr_bytes) g_bytes_unref(stderr_bytes);
+        g_clear_object(&win->ai_proc);
+        return;
+    }
+
+    /* Check exit status */
+    gboolean exited_ok = g_subprocess_get_successful(G_SUBPROCESS(src));
+
+    /* Detect invalid session — clear session and retry with new one */
+    if (!exited_ok && win->ai_session_id[0]) {
+        gboolean session_invalid = FALSE;
+        if (stdout_bytes) {
+            gsize slen;
+            const char *sdata = g_bytes_get_data(stdout_bytes, &slen);
+            if (slen > 0 && strstr(sdata, "No conversation found"))
+                session_invalid = TRUE;
+        }
+        if (!session_invalid && stderr_bytes) {
+            gsize slen;
+            const char *sdata = g_bytes_get_data(stderr_bytes, &slen);
+            if (slen > 0 && strstr(sdata, "No conversation found"))
+                session_invalid = TRUE;
+        }
+        if (session_invalid) {
+            /* Clear stale session */
+            win->ai_session_id[0] = '\0';
+            win->settings.ai_last_session[0] = '\0';
+            settings_save(&win->settings);
+            if (stdout_bytes) g_bytes_unref(stdout_bytes);
+            if (stderr_bytes) g_bytes_unref(stderr_bytes);
+            g_clear_object(&win->ai_proc);
+            /* Retry: re-send the last prompt without --resume */
+            if (win->ai_last_prompt) {
+                g_string_append(win->ai_conversation_md,
+                    "\n\n*Session expired, starting new session...*\n\n");
+                ai_refresh_output(win);
+                /* Put prompt back into buffer so send_prompt_to_ai picks it up */
+                gtk_text_buffer_set_text(win->prompt_buffer, win->ai_last_prompt, -1);
+                g_free(win->ai_last_prompt);
+                win->ai_last_prompt = NULL;
+                send_prompt_to_ai(win);
+            }
+            return;
+        }
+    }
+
     if (stdout_bytes) {
         gsize len;
         const char *json = g_bytes_get_data(stdout_bytes, &len);
-        g_string_truncate(win->ai_response_buf, 0);
-        g_string_append_len(win->ai_response_buf, json, len);
+
+        if (len > 0 && strstr(json, "\"result\"")) {
+            /* Valid response */
+            g_string_truncate(win->ai_response_buf, 0);
+            g_string_append_len(win->ai_response_buf, json, len);
+            g_bytes_unref(stdout_bytes);
+            if (stderr_bytes) g_bytes_unref(stderr_bytes);
+            ai_parse_and_display(win);
+            g_clear_object(&win->ai_proc);
+            return;
+        }
+
+        /* Got stdout but no valid JSON result */
+        if (!exited_ok) {
+            /* Try to extract error from stderr or stdout */
+            const char *errmsg = NULL;
+            gsize errlen = 0;
+            if (stderr_bytes) {
+                errmsg = g_bytes_get_data(stderr_bytes, &errlen);
+            }
+            if (errlen > 0 && errmsg) {
+                char *msg = g_strndup(errmsg, errlen < 500 ? errlen : 500);
+                g_string_append_printf(win->ai_conversation_md,
+                    "\n\n**Error (process failed):**\n```\n%s\n```\n\n", msg);
+                g_free(msg);
+            } else if (len > 0) {
+                char *msg = g_strndup(json, len < 500 ? len : 500);
+                g_string_append_printf(win->ai_conversation_md,
+                    "\n\n**Error (unexpected output):**\n```\n%s\n```\n\n", msg);
+                g_free(msg);
+            } else {
+                g_string_append(win->ai_conversation_md,
+                    "\n\n**Error:** Process failed with no output.\n\n");
+            }
+        } else {
+            /* Exited OK but no result field — empty or malformed response */
+            if (len == 0) {
+                g_string_append(win->ai_conversation_md,
+                    "\n\n**Error:** Empty response from model.\n\n");
+            } else {
+                char *msg = g_strndup(json, len < 500 ? len : 500);
+                g_string_append_printf(win->ai_conversation_md,
+                    "\n\n**Error (no result):**\n```\n%s\n```\n\n", msg);
+                g_free(msg);
+            }
+        }
         g_bytes_unref(stdout_bytes);
-        ai_parse_and_display(win);
-    } else if (err) {
-        if (!win->ai_conversation_md)
-            win->ai_conversation_md = g_string_new(NULL);
-        g_string_append_printf(win->ai_conversation_md, "\n\n**Error:** %s\n\n", err->message);
-        ai_refresh_output(win);
-        g_error_free(err);
+    } else {
+        /* No stdout at all */
+        g_string_append(win->ai_conversation_md,
+            "\n\n**Error:** No response from model. Check your connection and API key.\n\n");
     }
 
+    ai_refresh_output(win);
+    gtk_label_set_text(win->ai_status_label, "error");
+    update_status_bar(win);
+    if (stderr_bytes) g_bytes_unref(stderr_bytes);
     g_clear_object(&win->ai_proc);
 }
 
@@ -3477,7 +3690,7 @@ static void send_prompt_to_ai(VibeWindow *win) {
     g_ptr_array_add(argv, NULL);
 
     GSubprocessLauncher *launcher = g_subprocess_launcher_new(
-        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
 
     /* Use terminal's CWD as working directory for claude */
     const char *term_uri = vte_terminal_get_termprop_string(win->terminal, VTE_TERMPROP_CURRENT_DIRECTORY_URI, NULL);
@@ -3558,7 +3771,7 @@ static void on_tab_switched(GtkNotebook *nb, GtkWidget *page, guint page_num, gp
             gtk_widget_grab_focus(GTK_WIDGET(win->prompt_view));
             break;
     }
-    update_status_bar(win);
+    update_status_bar_page(win, (int)page_num);
 }
 
 /* ── Status bar update ── */
@@ -3655,14 +3868,51 @@ static void update_cursor_label(VibeWindow *win) {
     gtk_label_set_text(win->cursor_label, buf);
 }
 
-static void update_status_bar(VibeWindow *win) {
-    int page = gtk_notebook_get_current_page(win->notebook);
+static void update_status_bar_page(VibeWindow *win, int page) {
     if (page == 0) {
         update_file_status(win);
         update_cursor_label(win);
+        /* Title: filename or app name */
+        if (win->current_file[0]) {
+            const char *base = strrchr(win->current_file, '/');
+            base = base ? base + 1 : win->current_file;
+            if (win->file_modified) {
+                char t[300];
+                snprintf(t, sizeof(t), "%s [modified]", base);
+                gtk_window_set_title(GTK_WINDOW(win->window), t);
+            } else {
+                gtk_window_set_title(GTK_WINDOW(win->window), base);
+            }
+        } else {
+            gtk_window_set_title(GTK_WINDOW(win->window), "Vibe Light");
+        }
+    } else if (page == 1) {
+        gtk_label_set_text(win->status_label, "");
+        gtk_label_set_text(win->cursor_label, "");
+        gtk_window_set_title(GTK_WINDOW(win->window), "Terminal");
+    } else if (page == 2) {
+        /* AI tab: show model name on left, session on right */
+        const char *model = gtk_label_get_text(win->ai_status_label);
+        if (model && model[0] && strcmp(model, "ready") != 0
+            && strncmp(model, "thinking", 8) != 0) {
+            gtk_label_set_text(win->status_label, model);
+            gtk_window_set_title(GTK_WINDOW(win->window), model);
+        } else {
+            gtk_label_set_text(win->status_label, "AI Model");
+            gtk_window_set_title(GTK_WINDOW(win->window), "AI Model");
+        }
+
+        if (win->ai_session_id[0]) {
+            char sid[160];
+            snprintf(sid, sizeof(sid), "session: %s", win->ai_session_id);
+            gtk_label_set_text(win->cursor_label, sid);
+        } else {
+            gtk_label_set_text(win->cursor_label, "no session");
+        }
     } else {
         gtk_label_set_text(win->status_label, "");
         gtk_label_set_text(win->cursor_label, "");
+        gtk_window_set_title(GTK_WINDOW(win->window), "Vibe Light");
     }
 
     /* SFTP indicator */
@@ -3677,6 +3927,10 @@ static void update_status_bar(VibeWindow *win) {
             gtk_widget_set_visible(win->sftp_box, FALSE);
         }
     }
+}
+
+static void update_status_bar(VibeWindow *win) {
+    update_status_bar_page(win, gtk_notebook_get_current_page(win->notebook));
 }
 
 /* ── Window close ── */
@@ -3970,6 +4224,7 @@ static GtkWidget *build_menu_button(void) {
     g_menu_append(menu, "Open Folder", "win.open-folder");
     g_menu_append(menu, "SFTP/SSH", "win.sftp");
     g_menu_append(menu, "AI Model", "win.ai-model");
+    g_menu_append(menu, "Save as PDF", "win.save-pdf");
     g_menu_append(menu, "Settings", "win.settings");
 
     GtkWidget *btn = gtk_menu_button_new();
@@ -4241,6 +4496,12 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
         "---\n"
     );
     ai_refresh_output(win);
+
+    /* Restore persisted session ID */
+    if (win->settings.ai_last_session[0]) {
+        g_strlcpy(win->ai_session_id, win->settings.ai_last_session,
+                   sizeof(win->ai_session_id));
+    }
 
     gtk_paned_set_start_child(GTK_PANED(ai_paned), GTK_WIDGET(win->ai_webview));
 

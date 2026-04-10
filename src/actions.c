@@ -4,6 +4,8 @@
 #include <math.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <poppler.h>
+#include <cairo-pdf.h>
 
 /* ── Open Folder ── */
 
@@ -40,15 +42,25 @@ static void on_open_folder(GSimpleAction *action, GVariant *param, gpointer data
 
 /* ── Zoom ── */
 
+/* Returns pointer to font size for the currently focused section */
+static int *get_active_font_size(VibeWindow *win) {
+    int tab = gtk_notebook_get_current_page(win->notebook);
+    if (tab == 1) return &win->settings.terminal_font_size;
+    if (tab == 2) return &win->settings.ai_font_size;
+    /* Tab 0: check if file browser or editor has focus */
+    GtkWidget *focus = gtk_window_get_focus(GTK_WINDOW(win->window));
+    if (focus && (focus == GTK_WIDGET(win->file_list) ||
+                  gtk_widget_is_ancestor(focus, GTK_WIDGET(win->file_list))))
+        return &win->settings.browser_font_size;
+    return &win->settings.editor_font_size;
+}
+
 static void on_zoom_in(GSimpleAction *action, GVariant *param, gpointer data) {
     (void)action; (void)param;
     VibeWindow *win = data;
-    if (win->settings.editor_font_size < 72) {
-        win->settings.editor_font_size += 2;
-        win->settings.browser_font_size += 2;
-        win->settings.terminal_font_size += 2;
-        win->settings.prompt_font_size += 2;
-        win->settings.gui_font_size += 2;
+    int *fs = get_active_font_size(win);
+    if (*fs < 72) {
+        *fs += 2;
         settings_save(&win->settings);
         vibe_window_apply_settings(win);
     }
@@ -57,12 +69,9 @@ static void on_zoom_in(GSimpleAction *action, GVariant *param, gpointer data) {
 static void on_zoom_out(GSimpleAction *action, GVariant *param, gpointer data) {
     (void)action; (void)param;
     VibeWindow *win = data;
-    if (win->settings.editor_font_size > 6) {
-        win->settings.editor_font_size -= 2;
-        win->settings.browser_font_size -= 2;
-        win->settings.terminal_font_size -= 2;
-        win->settings.prompt_font_size -= 2;
-        win->settings.gui_font_size -= 2;
+    int *fs = get_active_font_size(win);
+    if (*fs > 6) {
+        *fs -= 2;
         settings_save(&win->settings);
         vibe_window_apply_settings(win);
     }
@@ -130,6 +139,17 @@ static void on_intensity_changed(GtkRange *range, gpointer data) {
     IntensityCtx *ctx = data;
     *ctx->field = gtk_range_get_value(range);
     vibe_window_apply_settings(ctx->win);
+}
+
+static void on_pdf_landscape_toggled(GtkCheckButton *btn, gpointer data) {
+    VibeWindow *win = data;
+    win->settings.pdf_landscape = gtk_check_button_get_active(btn);
+}
+
+static void on_pdf_page_numbers_changed(GtkDropDown *dd, GParamSpec *pspec, gpointer data) {
+    (void)pspec;
+    VibeWindow *win = data;
+    win->settings.pdf_page_numbers = (int)gtk_drop_down_get_selected(dd);
 }
 
 static void on_line_numbers_toggled(GtkCheckButton *btn, gpointer data) {
@@ -327,7 +347,7 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
         make_font_row(grid, &row, "Font:", win->settings.gui_font, &win->settings.gui_font_size, NULL, win, allocs);
 
         /* Font Intensity */
-        make_intensity_row(grid, &row, "Font Intensity:", &win->settings.font_intensity, win, allocs);
+        make_intensity_row(grid, &row, "Font Intensity:", &win->settings.gui_font_intensity, win, allocs);
 
         gtk_notebook_append_page(GTK_NOTEBOOK(nb), grid, gtk_label_new("GUI"));
     }
@@ -344,6 +364,7 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
         int row = 0;
 
         make_font_row(grid, &row, "Font:", win->settings.browser_font, &win->settings.browser_font_size, NULL, win, allocs);
+        make_intensity_row(grid, &row, "Font Intensity:", &win->settings.browser_font_intensity, win, allocs);
 
         /* Show Hidden Files */
         gtk_grid_attach(GTK_GRID(grid), make_label("Show Hidden Files:"), 0, row, 1, 1);
@@ -375,6 +396,7 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
         int row = 0;
 
         make_font_row(grid, &row, "Font:", win->settings.editor_font, &win->settings.editor_font_size, &win->settings.editor_font_weight, win, allocs);
+        make_intensity_row(grid, &row, "Font Intensity:", &win->settings.editor_font_intensity, win, allocs);
 
         /* Line Spacing */
         gtk_grid_attach(GTK_GRID(grid), make_label("Line Spacing:"), 0, row, 1, 1);
@@ -425,6 +447,7 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
         int row = 0;
 
         make_font_row(grid, &row, "Font:", win->settings.terminal_font, &win->settings.terminal_font_size, NULL, win, allocs);
+        make_intensity_row(grid, &row, "Font Intensity:", &win->settings.terminal_font_intensity, win, allocs);
 
         gtk_notebook_append_page(GTK_NOTEBOOK(nb), grid, gtk_label_new("Terminal"));
     }
@@ -458,6 +481,92 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
         gtk_grid_attach(GTK_GRID(grid), sw_check, 1, row++, 1, 1);
 
         gtk_notebook_append_page(GTK_NOTEBOOK(nb), grid, gtk_label_new("Prompt"));
+    }
+
+    /* ── Tab: AI Model ── */
+    {
+        GtkWidget *grid = gtk_grid_new();
+        gtk_grid_set_row_spacing(GTK_GRID(grid), 10);
+        gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
+        gtk_widget_set_margin_start(grid, 12);
+        gtk_widget_set_margin_end(grid, 12);
+        gtk_widget_set_margin_top(grid, 12);
+        gtk_widget_set_margin_bottom(grid, 12);
+        int row = 0;
+
+        make_font_row(grid, &row, "Font:", win->settings.prompt_font, &win->settings.ai_font_size, NULL, win, allocs);
+        make_intensity_row(grid, &row, "Font Intensity:", &win->settings.ai_font_intensity, win, allocs);
+
+        gtk_notebook_append_page(GTK_NOTEBOOK(nb), grid, gtk_label_new("AI Model"));
+    }
+
+    /* ── Tab: PDF ── */
+    {
+        GtkWidget *grid = gtk_grid_new();
+        gtk_grid_set_row_spacing(GTK_GRID(grid), 10);
+        gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
+        gtk_widget_set_margin_start(grid, 12);
+        gtk_widget_set_margin_end(grid, 12);
+        gtk_widget_set_margin_top(grid, 12);
+        gtk_widget_set_margin_bottom(grid, 12);
+        int row = 0;
+
+        /* Margin Left */
+        gtk_grid_attach(GTK_GRID(grid), make_label("Left margin (mm):"), 0, row, 1, 1);
+        GtkWidget *ml = gtk_spin_button_new_with_range(0, 50, 1);
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(ml), win->settings.pdf_margin_left);
+        IntensityCtx *ml_ctx = g_new(IntensityCtx, 1);
+        ml_ctx->win = win; ml_ctx->field = &win->settings.pdf_margin_left;
+        g_ptr_array_add(allocs, ml_ctx);
+        g_signal_connect(ml, "value-changed", G_CALLBACK(on_intensity_changed), ml_ctx);
+        gtk_grid_attach(GTK_GRID(grid), ml, 1, row++, 1, 1);
+
+        /* Margin Right */
+        gtk_grid_attach(GTK_GRID(grid), make_label("Right margin (mm):"), 0, row, 1, 1);
+        GtkWidget *mr = gtk_spin_button_new_with_range(0, 50, 1);
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(mr), win->settings.pdf_margin_right);
+        IntensityCtx *mr_ctx = g_new(IntensityCtx, 1);
+        mr_ctx->win = win; mr_ctx->field = &win->settings.pdf_margin_right;
+        g_ptr_array_add(allocs, mr_ctx);
+        g_signal_connect(mr, "value-changed", G_CALLBACK(on_intensity_changed), mr_ctx);
+        gtk_grid_attach(GTK_GRID(grid), mr, 1, row++, 1, 1);
+
+        /* Margin Top */
+        gtk_grid_attach(GTK_GRID(grid), make_label("Top margin (mm):"), 0, row, 1, 1);
+        GtkWidget *mt = gtk_spin_button_new_with_range(0, 50, 1);
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(mt), win->settings.pdf_margin_top);
+        IntensityCtx *mt_ctx = g_new(IntensityCtx, 1);
+        mt_ctx->win = win; mt_ctx->field = &win->settings.pdf_margin_top;
+        g_ptr_array_add(allocs, mt_ctx);
+        g_signal_connect(mt, "value-changed", G_CALLBACK(on_intensity_changed), mt_ctx);
+        gtk_grid_attach(GTK_GRID(grid), mt, 1, row++, 1, 1);
+
+        /* Margin Bottom */
+        gtk_grid_attach(GTK_GRID(grid), make_label("Bottom margin (mm):"), 0, row, 1, 1);
+        GtkWidget *mb = gtk_spin_button_new_with_range(0, 50, 1);
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(mb), win->settings.pdf_margin_bottom);
+        IntensityCtx *mb_ctx = g_new(IntensityCtx, 1);
+        mb_ctx->win = win; mb_ctx->field = &win->settings.pdf_margin_bottom;
+        g_ptr_array_add(allocs, mb_ctx);
+        g_signal_connect(mb, "value-changed", G_CALLBACK(on_intensity_changed), mb_ctx);
+        gtk_grid_attach(GTK_GRID(grid), mb, 1, row++, 1, 1);
+
+        /* Landscape */
+        gtk_grid_attach(GTK_GRID(grid), make_label("Landscape:"), 0, row, 1, 1);
+        GtkWidget *land_check = gtk_check_button_new();
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(land_check), win->settings.pdf_landscape);
+        g_signal_connect(land_check, "toggled", G_CALLBACK(on_pdf_landscape_toggled), win);
+        gtk_grid_attach(GTK_GRID(grid), land_check, 1, row++, 1, 1);
+
+        /* Page numbers */
+        gtk_grid_attach(GTK_GRID(grid), make_label("Page numbers:"), 0, row, 1, 1);
+        const char *pn_opts[] = {"None", "n", "n / total", NULL};
+        GtkWidget *pn_dd = gtk_drop_down_new_from_strings(pn_opts);
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(pn_dd), (guint)win->settings.pdf_page_numbers);
+        g_signal_connect(pn_dd, "notify::selected", G_CALLBACK(on_pdf_page_numbers_changed), win);
+        gtk_grid_attach(GTK_GRID(grid), pn_dd, 1, row++, 1, 1);
+
+        gtk_notebook_append_page(GTK_NOTEBOOK(nb), grid, gtk_label_new("PDF"));
     }
 
     /* Buttons */
@@ -966,7 +1075,30 @@ typedef struct {
     GtkCheckButton *chk_read, *chk_edit, *chk_write;
     GtkCheckButton *chk_glob, *chk_grep, *chk_bash;
     GtkCheckButton *chk_markdown;
+    GtkEntry       *session_entry;
 } AiModelCtx;
+
+static void on_ai_resume_session(GtkButton *btn, gpointer data) {
+    (void)btn;
+    AiModelCtx *ctx = data;
+    VibeWindow *win = ctx->win;
+    const char *sid = gtk_editable_get_text(GTK_EDITABLE(ctx->session_entry));
+    if (sid && sid[0]) {
+        g_strlcpy(win->ai_session_id, sid, sizeof(win->ai_session_id));
+        g_strlcpy(win->settings.ai_last_session, sid, sizeof(win->settings.ai_last_session));
+        settings_save(&win->settings);
+
+        /* Clear conversation display for resumed session */
+        if (win->ai_conversation_md) g_string_truncate(win->ai_conversation_md, 0);
+        g_string_append(win->ai_conversation_md, "# Session Resumed\n\nContinuing previous conversation...\n\n---\n");
+        win->ai_input_tokens = 0;
+        win->ai_output_tokens = 0;
+        vibe_window_switch_ai_mode(win);
+        gtk_label_set_text(win->ai_status_label, "ready");
+        gtk_label_set_text(win->ai_token_label, "in: 0  out: 0  total: 0");
+    }
+    gtk_window_close(ctx->dialog);
+}
 
 static void on_ai_model_apply(GtkButton *btn, gpointer data) {
     (void)btn;
@@ -991,6 +1123,7 @@ static void on_ai_new_session(GtkButton *btn, gpointer data) {
 
     /* Reset session */
     win->ai_session_id[0] = '\0';
+    win->settings.ai_last_session[0] = '\0';
     win->ai_input_tokens = 0;
     win->ai_output_tokens = 0;
     win->ai_last_elapsed = 0.0;
@@ -1162,6 +1295,20 @@ static void on_ai_model_dialog(GSimpleAction *action, GVariant *param, gpointer 
     gtk_label_set_selectable(GTK_LABEL(sid_label), TRUE);
     gtk_box_append(GTK_BOX(vbox), sid_label);
 
+    /* Resume session entry */
+    GtkWidget *resume_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    ctx->session_entry = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_placeholder_text(ctx->session_entry, "Paste session ID to resume...");
+    if (win->ai_session_id[0])
+        gtk_editable_set_text(GTK_EDITABLE(ctx->session_entry), win->ai_session_id);
+    gtk_widget_set_hexpand(GTK_WIDGET(ctx->session_entry), TRUE);
+    gtk_box_append(GTK_BOX(resume_box), GTK_WIDGET(ctx->session_entry));
+
+    GtkWidget *resume_btn = gtk_button_new_with_label("Resume");
+    g_signal_connect(resume_btn, "clicked", G_CALLBACK(on_ai_resume_session), ctx);
+    gtk_box_append(GTK_BOX(resume_box), resume_btn);
+    gtk_box_append(GTK_BOX(vbox), resume_box);
+
     /* Token usage + elapsed time */
     {
         char in_s[16], out_s[16], tot_s[16];
@@ -1252,6 +1399,319 @@ static void on_quit(GSimpleAction *act, GVariant *param, gpointer data) {
     gtk_window_close(GTK_WINDOW(win->window));
 }
 
+/* ── Print / Save to PDF ── */
+
+/* Prepare editor content as HTML for printing */
+static char *build_editor_print_html(VibeWindow *win) {
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(GTK_TEXT_BUFFER(win->file_buffer), &start, &end);
+    char *text = gtk_text_buffer_get_text(GTK_TEXT_BUFFER(win->file_buffer), &start, &end, FALSE);
+    if (!text) return NULL;
+
+    char *escaped = g_markup_escape_text(text, -1);
+    g_free(text);
+
+    const char *base = strrchr(win->current_file, '/');
+    base = base ? base + 1 : win->current_file;
+
+    char *html = g_strdup_printf(
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<style>body{font-family:monospace;font-size:12px;white-space:pre-wrap;"
+        "word-wrap:break-word;margin:0;padding:0;}"
+        "h2{font-family:sans-serif;margin-bottom:0.5em;}</style></head>"
+        "<body><h2>%s</h2><pre>%s</pre></body></html>",
+        base, escaped);
+    g_free(escaped);
+    return html;
+}
+
+/* Build AI conversation HTML for PDF export */
+/* Add page numbers to an existing PDF using poppler + cairo */
+static gboolean pdf_add_page_numbers(const char *input_path, const char *output_path, int mode) {
+    if (mode == 0) {
+        /* No page numbers — just rename/copy */
+        return g_file_test(input_path, G_FILE_TEST_EXISTS);
+    }
+
+    char *uri = g_filename_to_uri(input_path, NULL, NULL);
+    if (!uri) return FALSE;
+
+    PopplerDocument *doc = poppler_document_new_from_file(uri, NULL, NULL);
+    g_free(uri);
+    if (!doc) return FALSE;
+
+    int n_pages = poppler_document_get_n_pages(doc);
+    if (n_pages == 0) { g_object_unref(doc); return FALSE; }
+
+    /* Get page size from first page */
+    PopplerPage *first = poppler_document_get_page(doc, 0);
+    double pw, ph;
+    poppler_page_get_size(first, &pw, &ph);
+    g_object_unref(first);
+
+    /* Create output PDF with cairo */
+    cairo_surface_t *out_surface = cairo_pdf_surface_create(output_path, pw, ph);
+    cairo_t *cr = cairo_create(out_surface);
+
+    for (int i = 0; i < n_pages; i++) {
+        PopplerPage *page = poppler_document_get_page(doc, i);
+        if (!page) continue;
+
+        double w, h;
+        poppler_page_get_size(page, &w, &h);
+        cairo_pdf_surface_set_size(out_surface, w, h);
+
+        /* Render original page */
+        poppler_page_render_for_printing(page, cr);
+
+        /* Draw page number at bottom center */
+        cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, 10);
+
+        char num[32];
+        if (mode == 1)
+            snprintf(num, sizeof(num), "%d", i + 1);
+        else
+            snprintf(num, sizeof(num), "%d / %d", i + 1, n_pages);
+
+        cairo_text_extents_t ext;
+        cairo_text_extents(cr, num, &ext);
+        cairo_move_to(cr, (w - ext.width) / 2.0, h - 10);
+        cairo_show_text(cr, num);
+
+        cairo_show_page(cr);
+        g_object_unref(page);
+    }
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(out_surface);
+    g_object_unref(doc);
+    return TRUE;
+}
+
+/* Configure print operation with PDF settings */
+static void configure_print_op(WebKitPrintOperation *print_op, VibeWindow *win) {
+    GtkPrintSettings *ps = gtk_print_settings_new();
+    GtkPageSetup *page_setup = gtk_page_setup_new();
+
+    gtk_page_setup_set_left_margin(page_setup, win->settings.pdf_margin_left, GTK_UNIT_MM);
+    gtk_page_setup_set_right_margin(page_setup, win->settings.pdf_margin_right, GTK_UNIT_MM);
+    gtk_page_setup_set_top_margin(page_setup, win->settings.pdf_margin_top, GTK_UNIT_MM);
+    gtk_page_setup_set_bottom_margin(page_setup, win->settings.pdf_margin_bottom, GTK_UNIT_MM);
+    if (win->settings.pdf_landscape)
+        gtk_page_setup_set_orientation(page_setup, GTK_PAGE_ORIENTATION_LANDSCAPE);
+
+    webkit_print_operation_set_print_settings(print_op, ps);
+    webkit_print_operation_set_page_setup(print_op, page_setup);
+
+    g_object_unref(ps);
+    g_object_unref(page_setup);
+}
+
+/* Ctrl+P — open system print dialog */
+static void on_print_pdf(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    VibeWindow *win = data;
+    int page = gtk_notebook_get_current_page(win->notebook);
+
+    if (page == 2) {
+        WebKitPrintOperation *print_op = webkit_print_operation_new(win->ai_webview);
+        configure_print_op(print_op, win);
+        webkit_print_operation_run_dialog(print_op, GTK_WINDOW(win->window));
+        g_object_unref(print_op);
+    } else if (page == 0 && win->current_file[0]) {
+        char *html = build_editor_print_html(win);
+        if (!html) return;
+        webkit_web_view_load_html(win->ai_webview, html, NULL);
+        g_free(html);
+
+        WebKitPrintOperation *print_op = webkit_print_operation_new(win->ai_webview);
+        configure_print_op(print_op, win);
+        webkit_print_operation_run_dialog(print_op, GTK_WINDOW(win->window));
+        g_object_unref(print_op);
+
+        vibe_window_switch_ai_mode(win);
+    }
+}
+
+/* Save as PDF — WebKit prints to temp, then poppler adds page numbers */
+
+typedef struct {
+    VibeWindow *win;
+    char *pdf_path;
+    char *tmp_path;
+    gboolean restore_ai;
+} SavePdfCtx;
+
+static void on_print_finished(WebKitPrintOperation *op, gpointer data) {
+    (void)op;
+    SavePdfCtx *ctx = data;
+
+    if (ctx->win->settings.pdf_page_numbers > 0) {
+        /* Add page numbers via poppler+cairo */
+        if (pdf_add_page_numbers(ctx->tmp_path, ctx->pdf_path,
+                                  ctx->win->settings.pdf_page_numbers)) {
+            char msg[512];
+            const char *bname = strrchr(ctx->pdf_path, '/');
+            bname = bname ? bname + 1 : ctx->pdf_path;
+            snprintf(msg, sizeof(msg), "Saved %s", bname);
+            vibe_window_toast(ctx->win, msg);
+        } else {
+            /* Fallback: just use the temp file as-is */
+            rename(ctx->tmp_path, ctx->pdf_path);
+            vibe_window_toast(ctx->win, "Saved PDF (without page numbers)");
+        }
+        unlink(ctx->tmp_path);
+    } else {
+        /* No page numbers — just move temp to final */
+        rename(ctx->tmp_path, ctx->pdf_path);
+        char msg[512];
+        const char *bname = strrchr(ctx->pdf_path, '/');
+        bname = bname ? bname + 1 : ctx->pdf_path;
+        snprintf(msg, sizeof(msg), "Saved %s", bname);
+        vibe_window_toast(ctx->win, msg);
+    }
+
+    if (ctx->restore_ai)
+        vibe_window_switch_ai_mode(ctx->win);
+
+    g_free(ctx->pdf_path);
+    g_free(ctx->tmp_path);
+    g_free(ctx);
+}
+
+static void on_print_failed(WebKitPrintOperation *op, GError *error, gpointer data) {
+    (void)op;
+    SavePdfCtx *ctx = data;
+    char msg[512];
+    snprintf(msg, sizeof(msg), "PDF failed: %s", error ? error->message : "unknown");
+    vibe_window_toast(ctx->win, msg);
+    unlink(ctx->tmp_path);
+    if (ctx->restore_ai)
+        vibe_window_switch_ai_mode(ctx->win);
+    g_free(ctx->pdf_path);
+    g_free(ctx->tmp_path);
+    g_free(ctx);
+}
+
+static void on_save_pdf_selected(GObject *src, GAsyncResult *res, gpointer data) {
+    VibeWindow *win = data;
+    GtkFileDialog *dialog = GTK_FILE_DIALOG(src);
+    GFile *file = gtk_file_dialog_save_finish(dialog, res, NULL);
+    if (!file) return;
+
+    char *pdf_path = g_file_get_path(file);
+    g_object_unref(file);
+    if (!pdf_path) return;
+
+    int page = gtk_notebook_get_current_page(win->notebook);
+    gboolean restore_ai = FALSE;
+
+    if (page == 0 && win->current_file[0]) {
+        char *html = build_editor_print_html(win);
+        if (html) {
+            webkit_web_view_load_html(win->ai_webview, html, NULL);
+            g_free(html);
+            restore_ai = TRUE;
+        }
+    } else if (page == 2) {
+        /* AI tab — webview already has content */
+    } else {
+        vibe_window_toast(win, "Nothing to export");
+        g_free(pdf_path);
+        return;
+    }
+
+    /* Create temp file for WebKit output */
+    char *tmp_path = NULL;
+    int fd = g_file_open_tmp("vibe-pdf-XXXXXX.pdf", &tmp_path, NULL);
+    if (fd < 0) {
+        vibe_window_toast(win, "Failed to create temp file");
+        g_free(pdf_path);
+        return;
+    }
+    close(fd);
+
+    WebKitPrintOperation *print_op = webkit_print_operation_new(win->ai_webview);
+    GtkPrintSettings *ps = gtk_print_settings_new();
+    GtkPageSetup *page_setup = gtk_page_setup_new();
+
+    gtk_page_setup_set_left_margin(page_setup, win->settings.pdf_margin_left, GTK_UNIT_MM);
+    gtk_page_setup_set_right_margin(page_setup, win->settings.pdf_margin_right, GTK_UNIT_MM);
+    gtk_page_setup_set_top_margin(page_setup, win->settings.pdf_margin_top, GTK_UNIT_MM);
+    gtk_page_setup_set_bottom_margin(page_setup, win->settings.pdf_margin_bottom, GTK_UNIT_MM);
+    if (win->settings.pdf_landscape)
+        gtk_page_setup_set_orientation(page_setup, GTK_PAGE_ORIENTATION_LANDSCAPE);
+
+    /* Print to temp file silently */
+    gtk_print_settings_set_printer(ps, "Print to File");
+    gtk_print_settings_set(ps, GTK_PRINT_SETTINGS_OUTPUT_FILE_FORMAT, "pdf");
+    char *uri = g_filename_to_uri(tmp_path, NULL, NULL);
+    if (uri) {
+        gtk_print_settings_set(ps, GTK_PRINT_SETTINGS_OUTPUT_URI, uri);
+        g_free(uri);
+    }
+
+    webkit_print_operation_set_print_settings(print_op, ps);
+    webkit_print_operation_set_page_setup(print_op, page_setup);
+
+    /* Connect signals for completion */
+    SavePdfCtx *ctx = g_new0(SavePdfCtx, 1);
+    ctx->win = win;
+    ctx->pdf_path = pdf_path;
+    ctx->tmp_path = tmp_path;
+    ctx->restore_ai = restore_ai;
+
+    g_signal_connect(print_op, "finished", G_CALLBACK(on_print_finished), ctx);
+    g_signal_connect(print_op, "failed", G_CALLBACK(on_print_failed), ctx);
+
+    /* Silent print to file — no dialog */
+    webkit_print_operation_print(print_op);
+
+    g_object_unref(ps);
+    g_object_unref(page_setup);
+    /* Don't unref print_op here — need it alive for signals */
+}
+
+static void on_save_pdf(GSimpleAction *act, GVariant *param, gpointer data) {
+    (void)act; (void)param;
+    VibeWindow *win = data;
+
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(dialog, "Save as PDF");
+
+    /* Default filename */
+    const char *name = "document.pdf";
+    int page = gtk_notebook_get_current_page(win->notebook);
+    char fname[256];
+    if (page == 0 && win->current_file[0]) {
+        const char *base = strrchr(win->current_file, '/');
+        base = base ? base + 1 : win->current_file;
+        /* Replace extension with .pdf */
+        g_strlcpy(fname, base, sizeof(fname));
+        char *dot = strrchr(fname, '.');
+        if (dot) *dot = '\0';
+        g_strlcat(fname, ".pdf", sizeof(fname));
+        name = fname;
+    } else if (page == 2) {
+        name = "ai-conversation.pdf";
+    }
+    gtk_file_dialog_set_initial_name(dialog, name);
+
+    GtkFileFilter *filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "PDF files");
+    gtk_file_filter_add_pattern(filter, "*.pdf");
+    GListStore *filters = g_list_store_new(GTK_TYPE_FILE_FILTER);
+    g_list_store_append(filters, filter);
+    gtk_file_dialog_set_filters(dialog, G_LIST_MODEL(filters));
+    g_object_unref(filter);
+    g_object_unref(filters);
+
+    gtk_file_dialog_save(dialog, GTK_WINDOW(win->window), NULL,
+                          on_save_pdf_selected, win);
+}
+
 /* ── Setup ── */
 
 static const GActionEntry win_actions[] = {
@@ -1265,6 +1725,8 @@ static const GActionEntry win_actions[] = {
     {"tab-terminal",  on_tab_terminal,    NULL, NULL, NULL, {0}},
     {"tab-ai",        on_tab_ai,          NULL, NULL, NULL, {0}},
     {"quit",          on_quit,            NULL, NULL, NULL, {0}},
+    {"print-pdf",     on_print_pdf,       NULL, NULL, NULL, {0}},
+    {"save-pdf",      on_save_pdf,        NULL, NULL, NULL, {0}},
 };
 
 /* Helper: set accel from settings string — supports "KEY1|KEY2" for alternatives */
@@ -1303,4 +1765,5 @@ void actions_setup(VibeWindow *win, GtkApplication *app) {
     set_accel(app, "win.tab-terminal", s->key_tab_terminal);
     set_accel(app, "win.tab-ai",       s->key_tab_ai);
     set_accel(app, "win.quit",         s->key_quit);
+    set_accel(app, "win.print-pdf",    s->key_print_pdf);
 }

@@ -6,8 +6,14 @@
 typedef struct {
     /* Global */
     char theme[64];
-    double font_intensity;
     double line_spacing;
+
+    /* Per-section font intensity (0.3–1.0) */
+    double gui_font_intensity;
+    double browser_font_intensity;
+    double editor_font_intensity;
+    double terminal_font_intensity;
+    double ai_font_intensity;
 
     /* GUI */
     char gui_font[256];
@@ -46,6 +52,16 @@ typedef struct {
     gboolean ai_tool_grep;
     gboolean ai_tool_bash;
     gboolean ai_markdown;       /* TRUE=render markdown, FALSE=raw text */
+    int ai_font_size;
+    char ai_last_session[128];  /* persist session ID across restarts */
+
+    /* PDF export */
+    double pdf_margin_left;     /* mm */
+    double pdf_margin_right;    /* mm */
+    double pdf_margin_top;      /* mm */
+    double pdf_margin_bottom;   /* mm */
+    gboolean pdf_landscape;
+    int pdf_page_numbers;       /* 0=none, 1=n, 2=n/total */
 
     /* Window */
     int window_width;
@@ -66,6 +82,7 @@ typedef struct {
     char key_tab_terminal[64];
     char key_tab_ai[64];
     char key_quit[64];
+    char key_print_pdf[64];
 } VibeSettings;
 
 /* SFTP/SSH connections */

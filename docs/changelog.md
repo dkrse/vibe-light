@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.7.0 (2026-04-10)
+
+### Features
+
+- **Per-section font intensity** -- independent intensity slider (0.3-1.0) for GUI, File Browser, Editor, Terminal, and AI Model (replaces single global slider)
+- **Per-section zoom** -- Ctrl+Plus/Ctrl+Minus now zooms only the active section (file browser, editor, terminal, or AI model) instead of all sections at once
+- **AI Model font settings** -- new "AI Model" tab in Settings with font family, size, and intensity for AI webview output
+- **PDF export** -- "Save as PDF" in menu with file chooser; WebKit renders to temp PDF, poppler+cairo adds page numbers, saves to chosen location
+- **PDF settings tab** -- new "PDF" tab in Settings with left/right/top/bottom margins (mm), landscape toggle, page numbers format (None / n / n÷total)
+- **Ctrl+P print** -- opens system print dialog for current tab content
+- **AI session persistence** -- session ID saved to settings, automatically restored on app restart
+- **AI session auto-recovery** -- if a saved session expires ("No conversation found"), automatically clears session and retries with a new one
+- **AI session resume UI** -- text entry + Resume button in AI Model dialog to paste and resume any session ID
+- **Dynamic title bar** -- shows filename on Files tab, "Terminal" on Terminal tab, model name on AI tab
+- **Dynamic status bar** -- AI tab shows model name (left) and full session ID (right) instead of empty status
+- **LaTeX rendering improvements** -- `\text{}`, `\mathrm{}`, `\textbf{}`, `\mathbf{}` render as plain text (not subscript); `\frac{num}{den}` renders as `(num)/(den)` with recursive processing; nested `{}` in subscript/superscript correctly paired
+- **AI error handling** -- comprehensive error reporting: process failures show stderr, empty responses detected, cancelled operations shown, exit codes checked
+
+### Bug Fixes
+
+- **Font intensity 100% bug** -- `rgba(...,0.100)` produced 10% opacity instead of 100%; fixed to output `rgba(...,1)` when alpha >= 0.995
+- **Terminal font intensity** -- was not responding; fixed by adding `gtk_widget_set_opacity` on terminal widget
+- **Tab status bar mismatch** -- GTK `switch-page` signal fires before page switch; fixed by passing `page_num` directly instead of reading `get_current_page`
+- **Title bar showing wrong content** -- file load/save/modify callbacks set title independently of active tab; centralized all title updates through `update_status_bar`
+- **AI model showing "unknown"** -- when JSON response lacks `modelUsage`, preserves previous model name instead of overwriting with "unknown"
+
+### Architecture
+
+- **poppler-glib** added as dependency for PDF page number rendering via cairo
+- `update_status_bar` split into `update_status_bar_page(win, page)` + `update_status_bar(win)` wrapper
+- `latex_to_unicode` handles `\text{}` family and `\frac{}{}` with recursive processing and nesting-aware brace matching
+- `on_ai_communicate_done` rewritten with comprehensive error handling: checks exit status, stderr capture, invalid session detection with auto-retry
+- `VibeSettings.font_intensity` replaced by 5 per-section intensity fields
+
+### Dependencies
+
+- **Added:** poppler-glib (`libpoppler-glib-dev`)
+
 ## v0.6.0 (2026-04-09)
 
 ### Features

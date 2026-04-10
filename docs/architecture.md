@@ -13,6 +13,7 @@ Vibe Light is a lightweight GTK4/libadwaita desktop application written in C17. 
 - **Terminal:** VTE (vte-2.91-gtk4)
 - **SSH/SFTP:** System `ssh` command (no libssh)
 - **AI Markdown:** WebKitGTK 6.0 (WebView) + cmark-gfm (Markdown→HTML)
+- **PDF Export:** poppler-glib + cairo (page number rendering)
 - **Build System:** Make + GCC
 - **Build Hardening:** `-fstack-protector-strong`, `-fPIE`, `-D_FORTIFY_SOURCE=2`
 
@@ -43,10 +44,11 @@ src/
   settings.h     (~85 lines)     VibeSettings + SftpConnection structs
   settings.c     (~310 lines)    Load/save config and connections, locale-safe
   actions.h      (~8 lines)      Action setup declaration
-  actions.c      (~1250 lines)   Open folder, zoom, tab switch, quit,
-                                  Settings dialog (6 tabs), SFTP dialog
-                                  (multi-connection), AI model dialog,
-                                  async SSH connect
+  actions.c      (~1500 lines)   Open folder, zoom (per-section), tab switch,
+                                  quit, Settings dialog (7 tabs incl. PDF),
+                                  SFTP dialog (multi-connection), AI model
+                                  dialog (session resume), PDF export with
+                                  poppler page numbers, async SSH connect
 ```
 
 Total: ~5500 lines of C.
@@ -91,15 +93,16 @@ Central struct holding all UI state:
 
 Configuration struct with per-section fonts and global controls:
 
-- **Global:** theme, font_intensity (0.3-1.0), line_spacing
-- **GUI:** font, size (headerbar, tabs, menus, dialogs, path bar, status bar)
-- **File Browser:** font, size, show_hidden, show_gitignored (0=hide, 1=gray)
-- **Editor:** font, size, weight, line_numbers, highlight_line, wrap_lines
-- **Terminal:** font, size
+- **Global:** theme, line_spacing
+- **GUI:** font, size, font_intensity (headerbar, tabs, menus, dialogs, path bar, status bar)
+- **File Browser:** font, size, font_intensity, show_hidden, show_gitignored (0=hide, 1=gray)
+- **Editor:** font, size, font_intensity, weight, line_numbers, highlight_line, wrap_lines
+- **Terminal:** font, size, font_intensity
 - **Prompt:** font, size, send_enter, switch_terminal
-- **AI Model:** full_disk_access, per-tool toggles (read, edit, write, glob, grep, bash)
+- **AI Model:** font_size, font_intensity, full_disk_access, per-tool toggles, ai_last_session
+- **PDF:** margins (left/right/top/bottom mm), landscape, page_numbers (0=none, 1=n, 2=n/total)
 - **Session:** last_file, last_cursor_line, last_cursor_col, last_tab
-- **Keybindings:** key_open_folder, key_zoom_in, key_zoom_out, key_tab_files, key_tab_terminal, key_tab_ai, key_quit
+- **Keybindings:** key_open_folder, key_zoom_in, key_zoom_out, key_tab_files, key_tab_terminal, key_tab_ai, key_quit, key_print_pdf
 
 ### SftpConnection / SftpConnections
 
@@ -164,15 +167,17 @@ Fonts are applied via CSS at two levels:
 
 ## Font Intensity
 
-Global font intensity (0.3-1.0) is applied everywhere through multiple mechanisms:
+Per-section font intensity (0.3-1.0) with independent controls for GUI, File Browser, Editor, Terminal, and AI Model:
 
 - **Editor** -- CSS `opacity` on `.file-viewer` widget (preserves syntax highlighting colors)
 - **Prompt** -- `GtkTextTag` with `foreground-rgba` alpha on prompt_buffer
-- **Terminal** -- `vte_terminal_set_color_foreground` with alpha, `vte_terminal_set_color_cursor` with alpha
-- **GUI elements** -- CSS `color: rgba(r,g,b,alpha)` on headerbar, notebook tabs, labels, popover items, file browser labels, path bar, status bar
+- **Terminal** -- `gtk_widget_set_opacity` on VTE widget + `vte_terminal_set_color_foreground` alpha
+- **GUI elements** -- CSS `color: rgba(r,g,b,alpha)` on headerbar, notebook tabs, labels, popover items, path bar, status bar
+- **File Browser** -- CSS `color: rgba(r,g,b,alpha)` on `.file-browser label`
+- **AI Model** -- CSS `opacity` injected into WebKit HTML body
 - **Editor/Prompt cursor** -- CSS `caret-color: rgba(r,g,b,alpha)`
 
-CSS rgba values use integer math (`rgba(r,g,b,0.%02d)`) to avoid locale decimal separator issues. Intensity changes apply live while dragging the slider.
+CSS rgba values use integer math with special handling for alpha=1.0 (`rgba(r,g,b,1)` instead of `rgba(r,g,b,0.100)`). Intensity changes apply live while dragging the slider.
 
 ## Git Status Integration
 
@@ -339,6 +344,9 @@ All operations show toast notifications on success/failure. Remote files are blo
 - CWD restriction: optional system prompt restricting file access to terminal's CWD
 - **HTML markdown rendering** via WebKitWebView: cmark-gfm parses markdown to HTML, rendered with dark/light CSS matching the app theme. LaTeX expressions (`$...$`, `$$...$$`) converted to Unicode (e.g. `\sum` → `∑`, `^2` → `²`). Hardware acceleration disabled for GPU-less environments.
 - Full support for tables, code blocks, headings, bold, italic, links, blockquotes, lists, strikethrough, horizontal rules
+- **LaTeX \text{} support** -- `\text{}`, `\mathrm{}`, `\textbf{}`, `\mathbf{}` render as plain text; `\frac{a}{b}` renders as `(a)/(b)` with recursive processing
+- **Session persistence** -- session ID saved to settings.conf, restored on startup, auto-cleared when expired
+- **Error handling** -- stderr captured, exit codes checked, empty/malformed responses reported in conversation
 - **Conversation logging** via `prompt_log.c` -- both input and output entries logged to `.LLM/prompts.json` with model, session, token counts, elapsed time. Input deferred until response arrives so model/session are accurate.
 
 ## Terminal
@@ -360,17 +368,18 @@ On startup, local files are restored (remote files are not auto-restored since t
 
 ## Configurable Keybindings
 
-7 configurable shortcuts stored in `settings.conf` (GTK accelerator format):
+8 configurable shortcuts stored in `settings.conf` (GTK accelerator format):
 
 | Setting | Default | Action |
 |---------|---------|--------|
 | `key_open_folder` | `<Control>o` | Open folder dialog |
-| `key_zoom_in` | `<Control>plus` | Zoom in all fonts |
-| `key_zoom_out` | `<Control>minus` | Zoom out all fonts |
+| `key_zoom_in` | `<Control>plus` | Zoom in active section |
+| `key_zoom_out` | `<Control>minus` | Zoom out active section |
 | `key_tab_files` | `<Alt>1` | Switch to Files tab |
 | `key_tab_terminal` | `<Alt>2` | Switch to Terminal tab |
 | `key_tab_ai` | `<Alt>3` | Switch to AI tab |
 | `key_quit` | `<Control>q` | Close window |
+| `key_print_pdf` | `<Control>p` | Print / Save as PDF |
 
 Supports `|` separator for alternative keys (e.g. `<Control>plus|<Control>equal`).
 
@@ -387,7 +396,7 @@ All dialogs use `AdwHeaderBar` as titlebar (via `vibe_dialog_new()` helper or di
 
 ## Settings Dialog
 
-6-tab GtkNotebook dialog: GUI, File Browser, Editor, Terminal, Prompt, AI Model.
+7-tab GtkNotebook dialog: GUI, File Browser, Editor, Terminal, Prompt, AI Model, PDF.
 
 Memory management: `GPtrArray` with `g_free` tracks heap-allocated callback contexts (`FontCtx`, `IntensityCtx`). Freed on dialog `destroy` signal (handles X button close, Apply, and Cancel).
 
@@ -403,8 +412,8 @@ Plain text key=value at `~/.config/vibe-light/settings.conf`.
 
 - **Locale-safe save:** forces `LC_NUMERIC=C` during `fprintf`
 - **Locale-safe load:** custom `parse_double()` with manual integer parsing (avoids `atof` locale dependency)
-- **Clamping:** font_intensity clamped to 0.3-1.0 after load
-- **Backwards compatible:** old per-section intensity keys map to global `font_intensity`
+- **Clamping:** all font_intensity values clamped to 0.3-1.0 after load
+- **Backwards compatible:** old single `font_intensity` key sets all per-section intensities
 - **Permissions:** `0600` (user-only read/write)
 - **Saved on:** settings apply, zoom, window close
 

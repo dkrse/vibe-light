@@ -13,6 +13,7 @@
 | VTE (dev) | Terminal emulation (gtk4 variant) | 2.91 |
 | WebKitGTK 6.0 (dev) | AI markdown rendering (WebView) | 6.0 |
 | cmark-gfm (dev) | GitHub-Flavored Markdown parser | any |
+| poppler-glib (dev) | PDF page number rendering (cairo) | any |
 
 ## Runtime Dependencies
 
@@ -24,6 +25,7 @@
 | VTE | Embedded terminal | yes |
 | WebKitGTK 6.0 | AI output WebView rendering | yes |
 | cmark-gfm | Markdown to HTML conversion | yes |
+| poppler-glib | PDF post-processing (page numbers) | yes |
 | GLib / GIO | Subprocess, file I/O, GTask | yes (bundled with GTK) |
 | OpenSSH client (`ssh`) | SFTP/SSH file browsing and terminal | for SFTP only |
 | git | Git status indicators in file browser | optional |
@@ -34,7 +36,7 @@
 ### Fedora (43+)
 
 ```bash
-sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel webkitgtk6.0-devel cmark-gfm-devel gcc make pkgconf-pkg-config
+sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gtksourceview5-devel webkitgtk6.0-devel cmark-gfm-devel poppler-glib-devel gcc make pkgconf-pkg-config
 ```
 
 For SFTP support (usually pre-installed):
@@ -46,13 +48,13 @@ sudo dnf install openssh-clients
 ### Ubuntu / Debian
 
 ```bash
-sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev libwebkitgtk-6.0-dev libcmark-gfm-dev gcc make pkg-config
+sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev libwebkitgtk-6.0-dev libcmark-gfm-dev libpoppler-glib-dev gcc make pkg-config
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S gtk4 libadwaita vte4 gtksourceview5 webkit2gtk-5.0 cmark-gfm gcc make pkg-config
+sudo pacman -S gtk4 libadwaita vte4 gtksourceview5 webkit2gtk-5.0 cmark-gfm poppler-glib gcc make pkg-config
 ```
 
 ## Build Hardening

@@ -40,8 +40,12 @@ static double parse_double(const char *val) {
 
 void settings_load(VibeSettings *s) {
     g_strlcpy(s->theme, "system", sizeof(s->theme));
-    s->font_intensity = 1.0;
     s->line_spacing = 1.0;
+    s->gui_font_intensity = 1.0;
+    s->browser_font_intensity = 1.0;
+    s->editor_font_intensity = 1.0;
+    s->terminal_font_intensity = 1.0;
+    s->ai_font_intensity = 1.0;
 
     g_strlcpy(s->gui_font, "Monospace", sizeof(s->gui_font));
     s->gui_font_size = 14;
@@ -74,6 +78,15 @@ void settings_load(VibeSettings *s) {
     s->ai_tool_grep = TRUE;
     s->ai_tool_bash = TRUE;
     s->ai_markdown = TRUE;
+    s->ai_font_size = 14;
+    s->ai_last_session[0] = '\0';
+
+    s->pdf_margin_left = 15.0;
+    s->pdf_margin_right = 15.0;
+    s->pdf_margin_top = 15.0;
+    s->pdf_margin_bottom = 15.0;
+    s->pdf_landscape = FALSE;
+    s->pdf_page_numbers = 1;
 
     s->window_width = 900;
     s->window_height = 600;
@@ -93,6 +106,7 @@ void settings_load(VibeSettings *s) {
     g_strlcpy(s->key_tab_terminal, "<Alt>2", sizeof(s->key_tab_terminal));
     g_strlcpy(s->key_tab_ai, "<Alt>3", sizeof(s->key_tab_ai));
     g_strlcpy(s->key_quit, "<Control>q", sizeof(s->key_quit));
+    g_strlcpy(s->key_print_pdf, "<Control>p", sizeof(s->key_print_pdf));
 
     FILE *f = fopen(settings_get_config_path(), "r");
     if (!f) return;
@@ -106,8 +120,12 @@ void settings_load(VibeSettings *s) {
         const char *key = line, *val = eq + 1;
 
         if (strcmp(key, "theme") == 0) g_strlcpy(s->theme, val, sizeof(s->theme));
-        else if (strcmp(key, "font_intensity") == 0) s->font_intensity = parse_double(val);
         else if (strcmp(key, "line_spacing") == 0) s->line_spacing = parse_double(val);
+        else if (strcmp(key, "gui_font_intensity") == 0) s->gui_font_intensity = parse_double(val);
+        else if (strcmp(key, "browser_font_intensity") == 0) s->browser_font_intensity = parse_double(val);
+        else if (strcmp(key, "editor_font_intensity") == 0) s->editor_font_intensity = parse_double(val);
+        else if (strcmp(key, "terminal_font_intensity") == 0) s->terminal_font_intensity = parse_double(val);
+        else if (strcmp(key, "ai_font_intensity") == 0) s->ai_font_intensity = parse_double(val);
 
         else if (strcmp(key, "gui_font") == 0) g_strlcpy(s->gui_font, val, sizeof(s->gui_font));
         else if (strcmp(key, "gui_font_size") == 0) s->gui_font_size = atoi(val);
@@ -141,6 +159,15 @@ void settings_load(VibeSettings *s) {
         else if (strcmp(key, "ai_tool_grep") == 0) s->ai_tool_grep = atoi(val);
         else if (strcmp(key, "ai_tool_bash") == 0) s->ai_tool_bash = atoi(val);
         else if (strcmp(key, "ai_markdown") == 0) s->ai_markdown = atoi(val);
+        else if (strcmp(key, "ai_font_size") == 0) s->ai_font_size = atoi(val);
+        else if (strcmp(key, "ai_last_session") == 0) g_strlcpy(s->ai_last_session, val, sizeof(s->ai_last_session));
+
+        else if (strcmp(key, "pdf_margin_left") == 0) s->pdf_margin_left = parse_double(val);
+        else if (strcmp(key, "pdf_margin_right") == 0) s->pdf_margin_right = parse_double(val);
+        else if (strcmp(key, "pdf_margin_top") == 0) s->pdf_margin_top = parse_double(val);
+        else if (strcmp(key, "pdf_margin_bottom") == 0) s->pdf_margin_bottom = parse_double(val);
+        else if (strcmp(key, "pdf_landscape") == 0) s->pdf_landscape = atoi(val);
+        else if (strcmp(key, "pdf_page_numbers") == 0) s->pdf_page_numbers = atoi(val);
 
         else if (strcmp(key, "window_width") == 0) s->window_width = atoi(val);
         else if (strcmp(key, "window_height") == 0) s->window_height = atoi(val);
@@ -160,14 +187,17 @@ void settings_load(VibeSettings *s) {
         else if (strcmp(key, "key_tab_terminal") == 0) g_strlcpy(s->key_tab_terminal, val, sizeof(s->key_tab_terminal));
         else if (strcmp(key, "key_tab_ai") == 0) g_strlcpy(s->key_tab_ai, val, sizeof(s->key_tab_ai));
         else if (strcmp(key, "key_quit") == 0) g_strlcpy(s->key_quit, val, sizeof(s->key_quit));
+        else if (strcmp(key, "key_print_pdf") == 0) g_strlcpy(s->key_print_pdf, val, sizeof(s->key_print_pdf));
 
-        /* backwards compat */
-        else if (strcmp(key, "gui_font_intensity") == 0 ||
-                 strcmp(key, "editor_font_intensity") == 0 ||
-                 strcmp(key, "terminal_font_intensity") == 0 ||
-                 strcmp(key, "prompt_font_intensity") == 0 ||
-                 strcmp(key, "browser_font_intensity") == 0) {
-            s->font_intensity = parse_double(val);
+        /* backwards compat — old single "font_intensity" sets all */
+        else if (strcmp(key, "font_intensity") == 0 ||
+                 strcmp(key, "prompt_font_intensity") == 0) {
+            double v = parse_double(val);
+            s->gui_font_intensity = v;
+            s->browser_font_intensity = v;
+            s->editor_font_intensity = v;
+            s->terminal_font_intensity = v;
+            s->ai_font_intensity = v;
         }
         else if (strcmp(key, "font") == 0) {
             g_strlcpy(s->gui_font, val, sizeof(s->gui_font));
@@ -180,14 +210,19 @@ void settings_load(VibeSettings *s) {
             int v = atoi(val);
             s->gui_font_size = v; s->browser_font_size = v;
             s->editor_font_size = v; s->terminal_font_size = v;
-            s->prompt_font_size = v;
+            s->prompt_font_size = v; s->ai_font_size = v;
         }
     }
     fclose(f);
 
     /* clamp / fix invalid values */
-    if (s->font_intensity < 0.3) s->font_intensity = 0.3;
-    if (s->font_intensity > 1.0) s->font_intensity = 1.0;
+    #define CLAMP_INTENSITY(x) do { if ((x) < 0.3) (x) = 0.3; if ((x) > 1.0) (x) = 1.0; } while(0)
+    CLAMP_INTENSITY(s->gui_font_intensity);
+    CLAMP_INTENSITY(s->browser_font_intensity);
+    CLAMP_INTENSITY(s->editor_font_intensity);
+    CLAMP_INTENSITY(s->terminal_font_intensity);
+    CLAMP_INTENSITY(s->ai_font_intensity);
+    #undef CLAMP_INTENSITY
     if (s->line_spacing < 1.0) s->line_spacing = 1.0;
 
     /* restore defaults for empty/zero font fields */
@@ -202,6 +237,7 @@ void settings_load(VibeSettings *s) {
     if (s->terminal_font_size < 6) s->terminal_font_size = 14;
     if (!s->prompt_font[0])    g_strlcpy(s->prompt_font, "Monospace", sizeof(s->prompt_font));
     if (s->prompt_font_size < 6)  s->prompt_font_size = 14;
+    if (s->ai_font_size < 6)  s->ai_font_size = 14;
 }
 
 static char *connections_get_path(void) {
@@ -278,8 +314,12 @@ void settings_save(const VibeSettings *s) {
     setlocale(LC_NUMERIC, "C");
 
     fprintf(f, "theme=%s\n", s->theme);
-    fprintf(f, "font_intensity=%.2f\n", s->font_intensity);
     fprintf(f, "line_spacing=%.1f\n", s->line_spacing);
+    fprintf(f, "gui_font_intensity=%.2f\n", s->gui_font_intensity);
+    fprintf(f, "browser_font_intensity=%.2f\n", s->browser_font_intensity);
+    fprintf(f, "editor_font_intensity=%.2f\n", s->editor_font_intensity);
+    fprintf(f, "terminal_font_intensity=%.2f\n", s->terminal_font_intensity);
+    fprintf(f, "ai_font_intensity=%.2f\n", s->ai_font_intensity);
 
     fprintf(f, "gui_font=%s\n", s->gui_font);
     fprintf(f, "gui_font_size=%d\n", s->gui_font_size);
@@ -313,6 +353,15 @@ void settings_save(const VibeSettings *s) {
     fprintf(f, "ai_tool_grep=%d\n", s->ai_tool_grep);
     fprintf(f, "ai_tool_bash=%d\n", s->ai_tool_bash);
     fprintf(f, "ai_markdown=%d\n", s->ai_markdown);
+    fprintf(f, "ai_font_size=%d\n", s->ai_font_size);
+    fprintf(f, "ai_last_session=%s\n", s->ai_last_session);
+
+    fprintf(f, "pdf_margin_left=%.1f\n", s->pdf_margin_left);
+    fprintf(f, "pdf_margin_right=%.1f\n", s->pdf_margin_right);
+    fprintf(f, "pdf_margin_top=%.1f\n", s->pdf_margin_top);
+    fprintf(f, "pdf_margin_bottom=%.1f\n", s->pdf_margin_bottom);
+    fprintf(f, "pdf_landscape=%d\n", s->pdf_landscape);
+    fprintf(f, "pdf_page_numbers=%d\n", s->pdf_page_numbers);
 
     fprintf(f, "window_width=%d\n", s->window_width);
     fprintf(f, "window_height=%d\n", s->window_height);
@@ -332,6 +381,7 @@ void settings_save(const VibeSettings *s) {
     fprintf(f, "key_tab_terminal=%s\n", s->key_tab_terminal);
     fprintf(f, "key_tab_ai=%s\n", s->key_tab_ai);
     fprintf(f, "key_quit=%s\n", s->key_quit);
+    fprintf(f, "key_print_pdf=%s\n", s->key_print_pdf);
 
     setlocale(LC_NUMERIC, saved_locale);
     fclose(f);
