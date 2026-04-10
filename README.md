@@ -52,6 +52,19 @@ make && sudo make install
 sudo sh -c 'echo /usr/local/lib > /etc/ld.so.conf.d/local.conf' && sudo ldconfig
 ```
 
+Then build with:
+
+```bash
+PKG_CONFIG_PATH=/usr/local/lib/pkgconfig make
+```
+
+Or add to `~/.bashrc` so plain `make` works:
+
+```bash
+echo 'export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
 ### Ubuntu / Debian
 
 ```bash
