@@ -171,7 +171,7 @@ Built-in integration with Claude CLI (`claude` command):
 - **Session auto-recovery** -- if a saved session expires, automatically retries with a new session
 - **Session info popover** -- click session in status bar to see session ID, started time, duration, turns, tokens, mode
 - Token usage tracking (input/output/total)
-- Configurable tool access (Read, Edit, Write, Glob, Grep, Bash) with auto-accept toggle
+- Configurable tool access (Read, Edit, Write, Glob, Grep, Bash) with auto-accept toggle and GUI confirmation dialogs for unapproved tools
 - **Markdown toggle** -- switch between HTML markdown rendering and raw text output
 - Optional CWD restriction for security
 - **Conversation logging** to `.LLM/prompts.json` with model, session, tokens, timestamps

@@ -40,11 +40,12 @@ src/
                                   go to line (Ctrl+G), undo/redo,
                                   editor key handler
   ai.h           (~16 lines)     AI assistant declarations
-  ai.c           (~1219 lines)   LaTeX to Unicode conversion,
+  ai.c           (~1330 lines)   LaTeX to Unicode conversion,
                                   markdown rendering (cmark-gfm + WebKit),
                                   AI prompt/response handling, JSON parsing,
                                   session management, token tracking,
-                                  streaming JSON line-by-line parser
+                                  streaming JSON line-by-line parser,
+                                  tool-use confirmation dialogs
   ssh.h          (~99 lines)     SSH utility declarations, poll context structs
   ssh.c          (~316 lines)    SSH transport: argv builders, ControlMaster,
                                   spawn_sync, cat_file, dir/file poll threads,
@@ -62,7 +63,7 @@ src/
                                   poppler page numbers, async SSH connect
 ```
 
-Total: ~7950 lines of C (9 source files + 7 headers).
+Total: ~8060 lines of C (9 source files + 7 headers).
 
 ## Key Data Structures
 
@@ -358,6 +359,7 @@ All operations show toast notifications on success/failure. Remote files are blo
 - Elapsed time display (seconds or minutes)
 - Model name extracted from response JSON
 - Configurable tool access: Read, Edit, Write, Glob, Grep, Bash
+- **Tool-use confirmation dialogs** (streaming mode) -- `tool_use` events in stream-json intercepted, modal dialog shown with tool name and key parameters. Auto-accept ON + tool enabled = skip dialog; auto-accept ON + tool disabled = dialog; auto_accept OFF = always dialog. Deny kills the subprocess. In streaming mode all 6 tools are always passed via `--allowed-tools` to prevent CLI stdin blocking; GUI handles the approval flow.
 - Markdown toggle: switch between HTML rendering and raw text output (`ai_markdown` setting)
 - CWD restriction: optional system prompt restricting file access to terminal's CWD
 - **HTML markdown rendering** via WebKitWebView: cmark-gfm parses markdown to HTML, rendered with dark/light CSS matching the app theme. LaTeX expressions (`$...$`, `$$...$$`) converted to Unicode (e.g. `\sum` → `∑`, `^2` → `²`). Hardware acceleration disabled for GPU-less environments.

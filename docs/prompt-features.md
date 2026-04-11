@@ -40,9 +40,25 @@ Individual toggles for Claude CLI tools:
 
 Tools are passed as `--allowedTools` flags to the `claude` command.
 
-### Auto-Accept
+### Auto-Accept & Tool Confirmation Dialogs
 
-When enabled, Claude CLI auto-accepts all enabled tools without confirmation prompts (`--auto-accept` flag). When disabled, each tool use requires user confirmation.
+Controls how tool-use requests are handled in streaming mode:
+
+| Auto-Accept | Tool Enabled | Behavior |
+|-------------|-------------|----------|
+| ON | YES | Auto-allow (no dialog) |
+| ON | NO | Show confirmation dialog |
+| OFF | any | Always show confirmation dialog |
+
+The confirmation dialog is a modal GTK window (`vibe_dialog_new`) showing:
+- Tool name (e.g. "Read", "Bash", "Edit")
+- Key parameters as compact labels (file_path, command, pattern, etc. -- not raw JSON)
+- **Allow** button (suggested-action) -- continues stream reading
+- **Deny** button (destructive-action) -- kills the AI process (`g_subprocess_force_exit`)
+
+In streaming mode, `--allowed-tools` always passes all 6 tools to the CLI to prevent it from blocking on stdin. The GUI handles the approval flow instead.
+
+In batch mode (non-streaming), no dialogs are shown -- Claude CLI handles its own confirmation in the terminal.
 
 ### Full Disk Access
 

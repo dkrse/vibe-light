@@ -5,7 +5,8 @@
 ### Features
 
 - **Interactive streaming output** -- AI responses now stream in real-time (line-by-line via `stream-json` format) instead of waiting for the complete response. Text appears as it's generated with 150ms debounced refresh. Configurable in AI Model dialog (toggle between interactive streaming and batch mode).
-- **Auto-accept allowed tools** -- new toggle in AI Model dialog; when off, Claude CLI asks for confirmation on each tool use instead of auto-accepting enabled tools
+- **Tool-use confirmation dialogs** -- in streaming mode, tool_use events are intercepted and shown in a modal GTK dialog with tool name, key parameters (file_path, command, pattern, etc.), and Allow/Deny buttons. Logic: auto_accept ON + tool enabled = auto-allow; auto_accept ON + tool disabled = dialog; auto_accept OFF = always dialog. Deny kills the AI process. Parameters displayed as compact markup labels (no raw JSON), long values truncated at 200 chars.
+- **Auto-accept allowed tools** -- new toggle in AI Model dialog; when off, every tool use shows a confirmation dialog instead of auto-accepting
 - **Session info popover** -- click session label in status bar (AI tab) to see session ID (selectable), started date/time, duration, turns count, token usage (in/out), and mode (streaming/batch)
 - **Session statistics persistence** -- session start time and turn count saved to settings.conf, restored on restart
 - **Application icon** -- window icon set via `gtk_window_set_icon_name("com.vibe.light")` with icons at 16/32/48/64/128/256px + scalable SVG
@@ -14,14 +15,17 @@
 
 ### Architecture
 
-- `ai.c` expanded (~1219 lines, was ~863) with streaming JSON parser:
-  - `json_extract_string()` / `json_extract_int()` -- lightweight JSON field extractors with full escape handling (including `\uXXXX` and UTF-16 surrogate pairs)
-  - `on_ai_stream_line_ready()` -- async line-by-line reader, processes `text_delta` events (appends to conversation) and `result` events (extracts metadata)
+- `ai.c` expanded (~1330 lines, was ~863) with streaming JSON parser and tool-use dialogs:
+  - `json_extract_string()` / `json_extract_int()` / `json_extract_raw_object()` -- lightweight JSON field extractors with full escape handling (including `\uXXXX` and UTF-16 surrogate pairs, nested object extraction)
+  - `on_ai_stream_line_ready()` -- async line-by-line reader, processes `text_delta` events (appends to conversation), `tool_use` events (confirmation dialog), and `result` events (extracts metadata)
+  - `ai_tool_use_confirm()` -- modal dialog with nested `g_main_loop` to pause stream reading until user responds
+  - `tool_params_summary()` -- extracts human-readable parameter summary per tool type
   - `ai_stream_finalize()` -- extracts session ID, model, tokens from final result event; logs prompt+response
+  - In streaming mode, `--allowed-tools` always passes all 6 tools (Read, Edit, Write, Glob, Grep, Bash) so CLI never blocks on stdin; GUI handles confirmation
   - Session expiry detection works in both streaming and batch modes (checks for "No conversation found" in result or empty EOF)
 - `VibeWindow` gains `ai_stream` (GDataInputStream), `ai_session_start`, `ai_session_turns` fields
 - `VibeSettings` gains `ai_streaming`, `ai_auto_accept`, `ai_session_start`, `ai_session_turns` fields
-- Total: ~7950 lines of C (9 source files + 7 headers)
+- Total: ~8060 lines of C (9 source files + 7 headers)
 
 ## v0.8.0 (2026-04-10)
 

@@ -10,6 +10,7 @@
 #include "theme.h"
 
 extern void update_status_bar(VibeWindow *win);
+extern GtkWidget *vibe_dialog_new(VibeWindow *win, const char *title, int width, int height);
 
 /* Convert LaTeX expression to Unicode approximation */
 char *latex_to_unicode(const char *latex) {
@@ -792,6 +793,176 @@ static int json_extract_int(const char *json, const char *key) {
     return atoi(p);
 }
 
+/* Extract raw JSON object value for a given key — returns the substring
+ * from the opening '{' to the matching '}', or NULL. Caller must g_free(). */
+static char *json_extract_raw_object(const char *json, const char *key) {
+    char needle[256];
+    snprintf(needle, sizeof(needle), "\"%s\":", key);
+    const char *p = strstr(json, needle);
+    if (!p) return NULL;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '{') return NULL;
+    int depth = 0;
+    const char *start = p;
+    gboolean in_string = FALSE;
+    for (; *p; p++) {
+        if (in_string) {
+            if (*p == '\\' && p[1]) { p++; continue; }
+            if (*p == '"') in_string = FALSE;
+            continue;
+        }
+        if (*p == '"') { in_string = TRUE; continue; }
+        if (*p == '{') depth++;
+        else if (*p == '}') { depth--; if (depth == 0) return g_strndup(start, (gsize)(p - start + 1)); }
+    }
+    return NULL;
+}
+
+/* ── Tool-use confirmation dialog (streaming mode, ai_auto_accept == FALSE) ── */
+
+typedef struct {
+    VibeWindow *win;
+    gboolean    allowed;
+    GMainLoop  *loop;
+} ToolConfirmCtx;
+
+static void on_tool_allow(GtkButton *btn, gpointer data) {
+    (void)btn;
+    ToolConfirmCtx *ctx = data;
+    ctx->allowed = TRUE;
+    g_main_loop_quit(ctx->loop);
+}
+
+static void on_tool_deny(GtkButton *btn, gpointer data) {
+    (void)btn;
+    ToolConfirmCtx *ctx = data;
+    ctx->allowed = FALSE;
+    g_main_loop_quit(ctx->loop);
+}
+
+static void on_tool_dialog_close(GtkWindow *dialog, gpointer data) {
+    (void)dialog;
+    ToolConfirmCtx *ctx = data;
+    /* Treat close as deny */
+    if (g_main_loop_is_running(ctx->loop))
+        g_main_loop_quit(ctx->loop);
+}
+
+/* Extract key parameters from tool input JSON and build a human-readable
+ * summary.  Returns a newly-allocated string or NULL if nothing useful. */
+static char *tool_params_summary(const char *tool_name, const char *input_json) {
+    if (!input_json || g_strcmp0(input_json, "{}") == 0)
+        return NULL;
+
+    GString *s = g_string_new(NULL);
+
+    /* Pick the most relevant fields per tool */
+    const char *keys[][4] = {
+        { "Read",  "file_path", NULL },
+        { "Edit",  "file_path", "old_string", "new_string" },
+        { "Write", "file_path", NULL },
+        { "Bash",  "command", NULL },
+        { "Glob",  "pattern", "path", NULL },
+        { "Grep",  "pattern", "path", "glob" },
+        { NULL }
+    };
+
+    const char **fields = NULL;
+    for (int i = 0; keys[i][0]; i++) {
+        if (g_strcmp0(tool_name, keys[i][0]) == 0) { fields = &keys[i][1]; break; }
+    }
+
+    if (fields) {
+        for (int i = 0; fields[i]; i++) {
+            char *val = json_extract_string(input_json, fields[i]);
+            if (val) {
+                /* Truncate very long values (e.g. file content) */
+                if (strlen(val) > 200) {
+                    val[197] = '.'; val[198] = '.'; val[199] = '.'; val[200] = '\0';
+                }
+                g_string_append_printf(s, "<b>%s:</b> %s\n", fields[i], val);
+                g_free(val);
+            }
+        }
+    }
+
+    if (s->len == 0) { g_string_free(s, TRUE); return NULL; }
+    /* Remove trailing newline */
+    if (s->str[s->len - 1] == '\n') g_string_truncate(s, s->len - 1);
+    return g_string_free(s, FALSE);
+}
+
+/* Show a modal tool-use confirmation dialog. Returns TRUE if allowed. */
+static gboolean ai_tool_use_confirm(VibeWindow *win, const char *tool_name,
+                                     const char *params_json) {
+    char title[128];
+    snprintf(title, sizeof(title), "Tool: %s", tool_name);
+
+    char *summary = tool_params_summary(tool_name, params_json);
+    gboolean has_params = summary != NULL;
+
+    GtkWidget *dialog = vibe_dialog_new(win, title, 350, -1);
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(box, 12);
+    gtk_widget_set_margin_end(box, 12);
+    gtk_widget_set_margin_top(box, 8);
+    gtk_widget_set_margin_bottom(box, 12);
+    gtk_window_set_child(GTK_WINDOW(dialog), box);
+
+    /* Label */
+    char *label_text = g_strdup_printf("Claude wants to use <b>%s</b>", tool_name);
+    GtkWidget *label = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(label), label_text);
+    gtk_label_set_xalign(GTK_LABEL(label), 0);
+    gtk_box_append(GTK_BOX(box), label);
+    g_free(label_text);
+
+    /* Parameters as markup labels — compact, no textview for simple info */
+    if (has_params) {
+        GtkWidget *params_label = gtk_label_new(NULL);
+        gtk_label_set_markup(GTK_LABEL(params_label), summary);
+        gtk_label_set_xalign(GTK_LABEL(params_label), 0);
+        gtk_label_set_wrap(GTK_LABEL(params_label), TRUE);
+        gtk_label_set_selectable(GTK_LABEL(params_label), TRUE);
+        PangoAttrList *attrs = pango_attr_list_new();
+        pango_attr_list_insert(attrs, pango_attr_family_new("monospace"));
+        pango_attr_list_insert(attrs, pango_attr_scale_new(0.9));
+        gtk_label_set_attributes(GTK_LABEL(params_label), attrs);
+        pango_attr_list_unref(attrs);
+        gtk_box_append(GTK_BOX(box), params_label);
+        g_free(summary);
+    }
+
+    /* Buttons */
+    GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(btn_box, GTK_ALIGN_END);
+    gtk_box_append(GTK_BOX(box), btn_box);
+
+    GtkWidget *deny_btn = gtk_button_new_with_label("Deny");
+    gtk_widget_add_css_class(deny_btn, "destructive-action");
+    gtk_box_append(GTK_BOX(btn_box), deny_btn);
+
+    GtkWidget *allow_btn = gtk_button_new_with_label("Allow");
+    gtk_widget_add_css_class(allow_btn, "suggested-action");
+    gtk_box_append(GTK_BOX(btn_box), allow_btn);
+
+    ToolConfirmCtx ctx = { .win = win, .allowed = FALSE,
+                           .loop = g_main_loop_new(NULL, FALSE) };
+
+    g_signal_connect(allow_btn, "clicked", G_CALLBACK(on_tool_allow), &ctx);
+    g_signal_connect(deny_btn, "clicked", G_CALLBACK(on_tool_deny), &ctx);
+    g_signal_connect(dialog, "close-request", G_CALLBACK(on_tool_dialog_close), &ctx);
+
+    gtk_window_present(GTK_WINDOW(dialog));
+    g_main_loop_run(ctx.loop);
+    g_main_loop_unref(ctx.loop);
+    gtk_window_destroy(GTK_WINDOW(dialog));
+
+    return ctx.allowed;
+}
+
 /* Finalize streaming response — extract metadata from accumulated buffer */
 static void ai_stream_finalize(VibeWindow *win) {
     /* Stop elapsed timer */
@@ -954,6 +1125,53 @@ void on_ai_stream_line_ready(GObject *src, GAsyncResult *res, gpointer data) {
     /* Process stream-json event line */
     if (!win->ai_conversation_md)
         win->ai_conversation_md = g_string_new(NULL);
+
+    /* ── Tool-use confirmation dialog ──
+     * auto_accept ON  + tool enabled  → auto-allow (no dialog)
+     * auto_accept ON  + tool disabled → show dialog
+     * auto_accept OFF                 → always show dialog */
+    if (strstr(line, "\"type\":\"tool_use\"") && strstr(line, "\"name\":\"")) {
+        char *tool_name = json_extract_string(line, "name");
+        char *input_json = json_extract_raw_object(line, "input");
+        if (tool_name) {
+            /* Check if this specific tool is enabled in settings */
+            gboolean tool_enabled = FALSE;
+            if (g_strcmp0(tool_name, "Read") == 0)  tool_enabled = win->settings.ai_tool_read;
+            else if (g_strcmp0(tool_name, "Edit") == 0)  tool_enabled = win->settings.ai_tool_edit;
+            else if (g_strcmp0(tool_name, "Write") == 0) tool_enabled = win->settings.ai_tool_write;
+            else if (g_strcmp0(tool_name, "Glob") == 0)  tool_enabled = win->settings.ai_tool_glob;
+            else if (g_strcmp0(tool_name, "Grep") == 0)  tool_enabled = win->settings.ai_tool_grep;
+            else if (g_strcmp0(tool_name, "Bash") == 0)  tool_enabled = win->settings.ai_tool_bash;
+
+            gboolean allowed = win->settings.ai_auto_accept && tool_enabled;
+
+            if (!allowed) {
+                /* Show in conversation */
+                g_string_append_printf(win->ai_conversation_md,
+                    "\n\n> **Tool call:** `%s`\n\n", tool_name);
+                ai_refresh_output(win);
+
+                allowed = ai_tool_use_confirm(win, tool_name, input_json);
+            }
+
+            if (!allowed) {
+                g_string_append(win->ai_conversation_md,
+                    "\n\n*Tool denied — stopping AI.*\n\n");
+                ai_refresh_output(win);
+                g_subprocess_force_exit(win->ai_proc);
+                if (win->ai_timer_id) { g_source_remove(win->ai_timer_id); win->ai_timer_id = 0; }
+                gtk_label_set_text(win->ai_status_label, "denied");
+                g_free(tool_name);
+                g_free(input_json);
+                g_free(line);
+                g_clear_object(&win->ai_stream);
+                g_clear_object(&win->ai_proc);
+                return;
+            }
+        }
+        g_free(tool_name);
+        g_free(input_json);
+    }
 
     /* Detect event type — stream_event wraps content_block_delta with nested delta.text */
     if (strstr(line, "\"text_delta\"")) {
@@ -1127,8 +1345,20 @@ void send_prompt_to_ai(VibeWindow *win) {
     } else {
         g_ptr_array_add(argv, (gpointer)"json");
     }
-    /* Add only the tools the user has enabled (only when auto-accept is on) */
-    if (win->settings.ai_auto_accept) {
+    /* Add allowed tools.
+     * In streaming mode: always pass ALL tools so the CLI never blocks on
+     * stdin — the GUI intercepts tool_use events and shows a confirmation
+     * dialog for tools that aren't auto-accepted.
+     * In batch mode: only pass enabled tools when auto_accept is on. */
+    if (win->settings.ai_streaming) {
+        g_ptr_array_add(argv, (gpointer)"--allowed-tools");
+        g_ptr_array_add(argv, (gpointer)"Edit");
+        g_ptr_array_add(argv, (gpointer)"Write");
+        g_ptr_array_add(argv, (gpointer)"Read");
+        g_ptr_array_add(argv, (gpointer)"Glob");
+        g_ptr_array_add(argv, (gpointer)"Grep");
+        g_ptr_array_add(argv, (gpointer)"Bash");
+    } else if (win->settings.ai_auto_accept) {
         gboolean any_tool = win->settings.ai_tool_read || win->settings.ai_tool_edit ||
                              win->settings.ai_tool_write || win->settings.ai_tool_glob ||
                              win->settings.ai_tool_grep || win->settings.ai_tool_bash;
