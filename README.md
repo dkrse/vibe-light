@@ -2,6 +2,11 @@
 
 A lightweight file browser, terminal, and AI assistant built with GTK4, libadwaita, and GtkSourceView. Includes SFTP/SSH support for remote file browsing, syntax highlighting for 200+ languages, and git status integration.
 
+![Files tab](screenshots/01.png)
+![Terminal tab](screenshots/02.png)
+![AI tab](screenshots/03.png)
+![Settings](screenshots/04.png)
+
 ## Features
 
 - **File Browser** -- Navigate directories with git status colors, context menu (rename, delete, new file/dir), drag & drop
@@ -167,6 +172,7 @@ Built-in integration with Claude CLI (`claude` command):
 - **Session info popover** -- click session in status bar to see session ID, started time, duration, turns, tokens, mode
 - Token usage tracking (input/output/total)
 - Configurable tool access (Read, Edit, Write, Glob, Grep, Bash) with auto-accept toggle
+- **Markdown toggle** -- switch between HTML markdown rendering and raw text output
 - Optional CWD restriction for security
 - **Conversation logging** to `.LLM/prompts.json` with model, session, tokens, timestamps
 
@@ -190,7 +196,7 @@ Prompts and responses are logged to `{project}/.LLM/prompts.json`:
 | Editor | Font, Font Intensity, Font Weight, Line Spacing, Line Numbers, Highlight Line, Wrap Lines |
 | Terminal | Font, Font Intensity |
 | Prompt | Font, Send with (Ctrl+Enter/Enter), Show Terminal after send |
-| AI Model | Font, Font Intensity, Full Disk Access, Tool toggles, Streaming, Auto-accept, Session resume |
+| AI Model | Font, Font Intensity, Full Disk Access, Tool toggles, Markdown rendering, Streaming, Auto-accept, Session resume |
 | PDF | Left/Right/Top/Bottom margins (mm), Landscape, Page numbers (None/n/n÷total) |
 
 ## Configuration

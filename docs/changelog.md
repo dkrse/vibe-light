@@ -95,6 +95,7 @@
 - **WebKitWebView AI output** -- replaced GtkTextView markdown approximation with full HTML rendering via WebKitWebView + cmark-gfm. Proper tables, code blocks, headings, bold, italic, links, blockquotes, lists, strikethrough, horizontal rules.
 - **LaTeX to Unicode** -- math expressions converted to Unicode symbols (e.g. `$\sum_{i=1}^{n}$` → `∑ᵢ₌₁ⁿ`, `$E = mc^2$` → `E = mc²`). Supports Greek letters, operators, arrows, set notation, superscripts, subscripts.
 - **Theme-aware AI output** -- dark and light CSS variants, automatically switches when app theme changes.
+- **Markdown rendering toggle** -- `ai_markdown` setting to switch between HTML markdown rendering and raw text output in AI Model dialog
 - **GPU-less rendering** -- WebKit hardware acceleration disabled (`WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER`) for environments without GPU access.
 
 ### Bug Fixes

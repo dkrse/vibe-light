@@ -113,8 +113,9 @@ Configuration struct with per-section fonts and global controls:
 - **Editor:** font, size, font_intensity, weight, line_numbers, highlight_line, wrap_lines
 - **Terminal:** font, size, font_intensity
 - **Prompt:** font, size, send_enter, switch_terminal
-- **AI Model:** font_size, font_intensity, full_disk_access, per-tool toggles, ai_streaming, ai_auto_accept, ai_last_session, ai_session_start, ai_session_turns
+- **AI Model:** font_size, font_intensity, full_disk_access, per-tool toggles, ai_markdown, ai_streaming, ai_auto_accept, ai_last_session, ai_session_start, ai_session_turns
 - **PDF:** margins (left/right/top/bottom mm), landscape, page_numbers (0=none, 1=n, 2=n/total)
+- **Window:** window_width, window_height, last_directory
 - **Session:** last_file, last_cursor_line, last_cursor_col, last_tab
 - **Keybindings:** key_open_folder, key_zoom_in, key_zoom_out, key_tab_files, key_tab_terminal, key_tab_ai, key_quit, key_print_pdf
 
@@ -357,6 +358,7 @@ All operations show toast notifications on success/failure. Remote files are blo
 - Elapsed time display (seconds or minutes)
 - Model name extracted from response JSON
 - Configurable tool access: Read, Edit, Write, Glob, Grep, Bash
+- Markdown toggle: switch between HTML rendering and raw text output (`ai_markdown` setting)
 - CWD restriction: optional system prompt restricting file access to terminal's CWD
 - **HTML markdown rendering** via WebKitWebView: cmark-gfm parses markdown to HTML, rendered with dark/light CSS matching the app theme. LaTeX expressions (`$...$`, `$$...$$`) converted to Unicode (e.g. `\sum` → `∑`, `^2` → `²`). Hardware acceleration disabled for GPU-less environments.
 - Full support for tables, code blocks, headings, bold, italic, links, blockquotes, lists, strikethrough, horizontal rules
