@@ -22,15 +22,16 @@ Vibe Light is a lightweight GTK4/libadwaita desktop application written in C17. 
 ```
 src/
   main.c         (~16 lines)     Entry point, AdwApplication setup
-  window.h       (~115 lines)    VibeWindow struct, public API
-  window.c       (~3100 lines)   Window construction, apply_settings,
+  window.h       (~118 lines)    VibeWindow struct, public API
+  window.c       (~3221 lines)   Window construction, apply_settings,
                                   file browser, git status integration,
                                   lazy loading, async file loading,
                                   file system monitoring (local + remote),
                                   context menu (rename/delete/new),
                                   drag & drop, toast notifications,
                                   session restore, remote dir chooser,
-                                  terminal spawn, status bar
+                                  terminal spawn, status bar,
+                                  session info popover
   theme.h        (~23 lines)     Theme definitions, declarations
   theme.c        (~154 lines)    Theme CSS generation, apply_theme,
                                   terminal colors, font intensity
@@ -38,11 +39,12 @@ src/
   editor.c       (~205 lines)    File save, search (Ctrl+F),
                                   go to line (Ctrl+G), undo/redo,
                                   editor key handler
-  ai.h           (~15 lines)     AI assistant declarations
-  ai.c           (~863 lines)    LaTeX to Unicode conversion,
+  ai.h           (~16 lines)     AI assistant declarations
+  ai.c           (~1219 lines)   LaTeX to Unicode conversion,
                                   markdown rendering (cmark-gfm + WebKit),
                                   AI prompt/response handling, JSON parsing,
-                                  session management, token tracking
+                                  session management, token tracking,
+                                  streaming JSON line-by-line parser
   ssh.h          (~99 lines)     SSH utility declarations, poll context structs
   ssh.c          (~316 lines)    SSH transport: argv builders, ControlMaster,
                                   spawn_sync, cat_file, dir/file poll threads,
@@ -50,17 +52,17 @@ src/
   prompt_log.h   (~30 lines)     Prompt logging API declarations
   prompt_log.c   (~196 lines)    JSON conversation log: input/output entries
                                   with model, session, tokens, timestamps
-  settings.h     (~113 lines)    VibeSettings + SftpConnection structs
-  settings.c     (~388 lines)    Load/save config and connections, locale-safe
+  settings.h     (~117 lines)    VibeSettings + SftpConnection structs
+  settings.c     (~398 lines)    Load/save config and connections, locale-safe
   actions.h      (~8 lines)      Action setup declaration
-  actions.c      (~1769 lines)   Open folder, zoom (per-section), tab switch,
+  actions.c      (~1793 lines)   Open folder, zoom (per-section), tab switch,
                                   quit, Settings dialog (7 tabs incl. PDF),
                                   SFTP dialog (multi-connection), AI model
                                   dialog (session resume), PDF export with
                                   poppler page numbers, async SSH connect
 ```
 
-Total: ~7400 lines of C (9 source files + 7 headers).
+Total: ~7950 lines of C (9 source files + 7 headers).
 
 ## Key Data Structures
 
@@ -79,7 +81,10 @@ Central struct holding all UI state:
 - `terminal` -- VteTerminal
 - `ai_webview` -- WebKitWebView for AI response display (HTML markdown rendering)
 - `ai_proc` / `ai_response_buf` -- Claude subprocess and response accumulator
+- `ai_stream` -- GDataInputStream for streaming line-by-line stdout reading
 - `ai_session_id` -- Session ID for `--resume`
+- `ai_session_start` -- Real time (µs) when session was created
+- `ai_session_turns` -- Number of prompts sent in this session
 - `ai_input_tokens` / `ai_output_tokens` -- Token usage tracking
 - `prompt_view` / `prompt_buffer` -- Text input for AI prompt
 - `ssh_host`, `ssh_user`, `ssh_port`, `ssh_key`, `ssh_remote_path`, `ssh_mount` -- SSH connection state
@@ -108,7 +113,7 @@ Configuration struct with per-section fonts and global controls:
 - **Editor:** font, size, font_intensity, weight, line_numbers, highlight_line, wrap_lines
 - **Terminal:** font, size, font_intensity
 - **Prompt:** font, size, send_enter, switch_terminal
-- **AI Model:** font_size, font_intensity, full_disk_access, per-tool toggles, ai_last_session
+- **AI Model:** font_size, font_intensity, full_disk_access, per-tool toggles, ai_streaming, ai_auto_accept, ai_last_session, ai_session_start, ai_session_turns
 - **PDF:** margins (left/right/top/bottom mm), landscape, page_numbers (0=none, 1=n, 2=n/total)
 - **Session:** last_file, last_cursor_line, last_cursor_col, last_tab
 - **Keybindings:** key_open_folder, key_zoom_in, key_zoom_out, key_tab_files, key_tab_terminal, key_tab_ai, key_quit, key_print_pdf
@@ -344,7 +349,9 @@ All operations show toast notifications on success/failure. Remote files are blo
 
 ## AI Assistant
 
-- Spawns `claude -p "prompt" --output-format json` via GSubprocess
+- Spawns `claude -p "prompt" --output-format stream-json` (streaming) or `--output-format json` (batch) via GSubprocess
+- **Streaming mode** reads stdout line-by-line via `GDataInputStream`, processes `text_delta` events (append to conversation markdown) and `result` events (extract metadata). Refresh debounced at 150ms to avoid excessive re-rendering.
+- **Batch mode** reads all stdout when process exits (legacy behavior)
 - Session continuity via `--resume SESSION_ID`
 - Token tracking: input/output/total with dynamic formatting (k/M suffixes)
 - Elapsed time display (seconds or minutes)
@@ -354,7 +361,8 @@ All operations show toast notifications on success/failure. Remote files are blo
 - **HTML markdown rendering** via WebKitWebView: cmark-gfm parses markdown to HTML, rendered with dark/light CSS matching the app theme. LaTeX expressions (`$...$`, `$$...$$`) converted to Unicode (e.g. `\sum` → `∑`, `^2` → `²`). Hardware acceleration disabled for GPU-less environments.
 - Full support for tables, code blocks, headings, bold, italic, links, blockquotes, lists, strikethrough, horizontal rules
 - **LaTeX \text{} support** -- `\text{}`, `\mathrm{}`, `\textbf{}`, `\mathbf{}` render as plain text; `\frac{a}{b}` renders as `(a)/(b)` with recursive processing
-- **Session persistence** -- session ID saved to settings.conf, restored on startup, auto-cleared when expired
+- **Session persistence** -- session ID, start time, and turn count saved to settings.conf, restored on startup, auto-cleared when expired
+- **Session info popover** -- clicking session label in status bar shows session ID, started date/time, duration, turns, tokens, and mode
 - **Error handling** -- stderr captured, exit codes checked, empty/malformed responses reported in conversation
 - **Conversation logging** via `prompt_log.c` -- both input and output entries logged to `.LLM/prompts.json` with model, session, token counts, elapsed time. Input deferred until response arrives so model/session are accurate.
 

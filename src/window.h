@@ -34,7 +34,10 @@ struct _VibeWindow {
     GtkLabel             *ai_status_label;      /* model info */
     GSubprocess          *ai_proc;           /* running claude process */
     GString              *ai_response_buf;   /* accumulates full JSON response */
+    GDataInputStream     *ai_stream;         /* streaming: line-by-line stdout reader */
     char                  ai_session_id[128]; /* session ID for --resume */
+    gint64                ai_session_start;  /* real time when session was created */
+    int                   ai_session_turns;  /* number of prompts sent in this session */
     char                 *ai_last_prompt;     /* last sent prompt text (for deferred logging) */
 
     /* AI working directory (from terminal CWD) */

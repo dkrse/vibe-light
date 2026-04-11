@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Vibe Light
+Comment=Lightweight file browser and code editor with AI assistant
+Exec=/home/krse/Dev/apps/vibe-light/build/vibe-light
+Icon=com.vibe.light
+Terminal=false
+Type=Application
+Categories=Development;TextEditor;Utility;
+StartupWMClass=com.vibe.light

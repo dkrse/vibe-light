@@ -78,6 +78,8 @@ void settings_load(VibeSettings *s) {
     s->ai_tool_grep = TRUE;
     s->ai_tool_bash = TRUE;
     s->ai_markdown = TRUE;
+    s->ai_streaming = TRUE;
+    s->ai_auto_accept = TRUE;
     s->ai_font_size = 14;
     s->ai_last_session[0] = '\0';
 
@@ -159,8 +161,12 @@ void settings_load(VibeSettings *s) {
         else if (strcmp(key, "ai_tool_grep") == 0) s->ai_tool_grep = atoi(val);
         else if (strcmp(key, "ai_tool_bash") == 0) s->ai_tool_bash = atoi(val);
         else if (strcmp(key, "ai_markdown") == 0) s->ai_markdown = atoi(val);
+        else if (strcmp(key, "ai_streaming") == 0) s->ai_streaming = atoi(val);
+        else if (strcmp(key, "ai_auto_accept") == 0) s->ai_auto_accept = atoi(val);
         else if (strcmp(key, "ai_font_size") == 0) s->ai_font_size = atoi(val);
         else if (strcmp(key, "ai_last_session") == 0) g_strlcpy(s->ai_last_session, val, sizeof(s->ai_last_session));
+        else if (strcmp(key, "ai_session_start") == 0) s->ai_session_start = g_ascii_strtoll(val, NULL, 10);
+        else if (strcmp(key, "ai_session_turns") == 0) s->ai_session_turns = atoi(val);
 
         else if (strcmp(key, "pdf_margin_left") == 0) s->pdf_margin_left = parse_double(val);
         else if (strcmp(key, "pdf_margin_right") == 0) s->pdf_margin_right = parse_double(val);
@@ -353,8 +359,12 @@ void settings_save(const VibeSettings *s) {
     fprintf(f, "ai_tool_grep=%d\n", s->ai_tool_grep);
     fprintf(f, "ai_tool_bash=%d\n", s->ai_tool_bash);
     fprintf(f, "ai_markdown=%d\n", s->ai_markdown);
+    fprintf(f, "ai_streaming=%d\n", s->ai_streaming);
+    fprintf(f, "ai_auto_accept=%d\n", s->ai_auto_accept);
     fprintf(f, "ai_font_size=%d\n", s->ai_font_size);
     fprintf(f, "ai_last_session=%s\n", s->ai_last_session);
+    fprintf(f, "ai_session_start=%ld\n", (long)s->ai_session_start);
+    fprintf(f, "ai_session_turns=%d\n", s->ai_session_turns);
 
     fprintf(f, "pdf_margin_left=%.1f\n", s->pdf_margin_left);
     fprintf(f, "pdf_margin_right=%.1f\n", s->pdf_margin_right);

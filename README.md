@@ -10,7 +10,7 @@ A lightweight file browser, terminal, and AI assistant built with GTK4, libadwai
 - **Search** -- Ctrl+F find with highlighting and navigation, Ctrl+G go to line
 - **Live File Watching** -- File browser and editor update automatically when files change on disk
 - **Terminal** -- Embedded VTE terminal, spawned in the opened directory
-- **AI Assistant** -- Send prompts to Claude CLI, view responses in WebKitWebView with full HTML markdown rendering, token tracking
+- **AI Assistant** -- Send prompts to Claude CLI, view responses in WebKitWebView with full HTML markdown rendering, real-time streaming output, token tracking
 - **SFTP/SSH** -- Browse remote directories and view remote files via SSH, save multiple connection profiles
 - **13 Themes** -- System, Light, Dark, Solarized, Monokai, Gruvbox, Nord, Dracula, Tokyo Night, Catppuccin
 - **Per-section Fonts** -- Independent font settings for GUI, File Browser, Editor, Terminal, AI Model, and Prompt
@@ -158,13 +158,15 @@ SSH connections use ControlMaster multiplexing for efficient reuse of a single T
 Built-in integration with Claude CLI (`claude` command):
 
 - Send prompts and view responses in a dedicated tab
+- **Interactive streaming** -- responses stream in real-time as they're generated (configurable: streaming or batch mode)
 - **Full HTML markdown rendering** -- WebKitWebView with cmark-gfm: tables, code blocks, headings, bold, italic, links, blockquotes, lists, horizontal rules
 - **LaTeX to Unicode** -- math expressions like `$E = mc^2$` rendered as `E = mc²`, `$\sum$` as `∑`
 - **Theme-aware** -- AI output follows app theme (dark/light CSS)
 - Session continuity via `--resume` with automatic session persistence across restarts
 - **Session auto-recovery** -- if a saved session expires, automatically retries with a new session
+- **Session info popover** -- click session in status bar to see session ID, started time, duration, turns, tokens, mode
 - Token usage tracking (input/output/total)
-- Configurable tool access (Read, Edit, Write, Glob, Grep, Bash)
+- Configurable tool access (Read, Edit, Write, Glob, Grep, Bash) with auto-accept toggle
 - Optional CWD restriction for security
 - **Conversation logging** to `.LLM/prompts.json` with model, session, tokens, timestamps
 
@@ -188,7 +190,7 @@ Prompts and responses are logged to `{project}/.LLM/prompts.json`:
 | Editor | Font, Font Intensity, Font Weight, Line Spacing, Line Numbers, Highlight Line, Wrap Lines |
 | Terminal | Font, Font Intensity |
 | Prompt | Font, Send with (Ctrl+Enter/Enter), Show Terminal after send |
-| AI Model | Font, Font Intensity, Full Disk Access, Tool toggles, Session resume |
+| AI Model | Font, Font Intensity, Full Disk Access, Tool toggles, Streaming, Auto-accept, Session resume |
 | PDF | Left/Right/Top/Bottom margins (mm), Landscape, Page numbers (None/n/n÷total) |
 
 ## Configuration
@@ -202,6 +204,7 @@ SFTP connections are stored in `~/.config/vibe-light/connections.conf` (INI form
 - [Architecture](docs/architecture.md)
 - [Dependencies](docs/dependencies.md)
 - [Changelog](docs/changelog.md)
+- [Prompt Features](docs/prompt-features.md)
 
 ## Author
 

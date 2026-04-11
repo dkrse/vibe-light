@@ -52,8 +52,12 @@ typedef struct {
     gboolean ai_tool_grep;
     gboolean ai_tool_bash;
     gboolean ai_markdown;       /* TRUE=render markdown, FALSE=raw text */
+    gboolean ai_streaming;      /* TRUE=stream-json (interactive), FALSE=json (batch) */
+    gboolean ai_auto_accept;    /* TRUE=auto-accept allowed tools, FALSE=ask each time */
     int ai_font_size;
     char ai_last_session[128];  /* persist session ID across restarts */
+    gint64 ai_session_start;    /* real time (µs) when session was created */
+    int ai_session_turns;       /* number of prompts in this session */
 
     /* PDF export */
     double pdf_margin_left;     /* mm */

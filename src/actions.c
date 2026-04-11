@@ -1075,6 +1075,8 @@ typedef struct {
     GtkCheckButton *chk_read, *chk_edit, *chk_write;
     GtkCheckButton *chk_glob, *chk_grep, *chk_bash;
     GtkCheckButton *chk_markdown;
+    GtkCheckButton *chk_streaming;
+    GtkCheckButton *chk_auto_accept;
     GtkEntry       *session_entry;
 } AiModelCtx;
 
@@ -1111,6 +1113,8 @@ static void on_ai_model_apply(GtkButton *btn, gpointer data) {
     ctx->win->settings.ai_tool_grep  = gtk_check_button_get_active(ctx->chk_grep);
     ctx->win->settings.ai_tool_bash  = gtk_check_button_get_active(ctx->chk_bash);
     ctx->win->settings.ai_markdown   = gtk_check_button_get_active(ctx->chk_markdown);
+    ctx->win->settings.ai_streaming  = gtk_check_button_get_active(ctx->chk_streaming);
+    ctx->win->settings.ai_auto_accept = gtk_check_button_get_active(ctx->chk_auto_accept);
     settings_save(&ctx->win->settings);
     vibe_window_switch_ai_mode(ctx->win);
     gtk_window_close(ctx->dialog);
@@ -1249,6 +1253,26 @@ static void on_ai_model_dialog(GSimpleAction *action, GVariant *param, gpointer 
     gtk_label_set_xalign(GTK_LABEL(md_hint), 0);
     gtk_widget_add_css_class(md_hint, "dim-label");
     gtk_box_append(GTK_BOX(vbox), md_hint);
+
+    ctx->chk_streaming = GTK_CHECK_BUTTON(
+        gtk_check_button_new_with_label("Interactive streaming output"));
+    gtk_check_button_set_active(ctx->chk_streaming, win->settings.ai_streaming);
+    gtk_box_append(GTK_BOX(vbox), GTK_WIDGET(ctx->chk_streaming));
+
+    GtkWidget *stream_hint = gtk_label_new("Off = wait for complete response (batch mode)");
+    gtk_label_set_xalign(GTK_LABEL(stream_hint), 0);
+    gtk_widget_add_css_class(stream_hint, "dim-label");
+    gtk_box_append(GTK_BOX(vbox), stream_hint);
+
+    ctx->chk_auto_accept = GTK_CHECK_BUTTON(
+        gtk_check_button_new_with_label("Auto-accept allowed tools"));
+    gtk_check_button_set_active(ctx->chk_auto_accept, win->settings.ai_auto_accept);
+    gtk_box_append(GTK_BOX(vbox), GTK_WIDGET(ctx->chk_auto_accept));
+
+    GtkWidget *accept_hint = gtk_label_new("Off = model asks for confirmation before using tools");
+    gtk_label_set_xalign(GTK_LABEL(accept_hint), 0);
+    gtk_widget_add_css_class(accept_hint, "dim-label");
+    gtk_box_append(GTK_BOX(vbox), accept_hint);
 
     /* Session info */
     gtk_box_append(GTK_BOX(vbox), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));

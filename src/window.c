@@ -2394,6 +2394,115 @@ void update_status_bar(VibeWindow *win) {
     update_status_bar_page(win, gtk_notebook_get_current_page(win->notebook));
 }
 
+/* ── Session info popover ── */
+
+static void on_session_label_clicked(GtkGestureClick *gesture, int n_press,
+                                      double x, double y, gpointer data) {
+    (void)n_press; (void)x; (void)y;
+    VibeWindow *win = data;
+
+    /* Only show on AI tab */
+    if (gtk_notebook_get_current_page(win->notebook) != 2) return;
+    if (!win->ai_session_id[0]) return;
+
+    GtkWidget *popover = gtk_popover_new();
+    gtk_widget_set_parent(popover, gtk_event_controller_get_widget(
+        GTK_EVENT_CONTROLLER(gesture)));
+
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 4);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
+    gtk_widget_set_margin_start(grid, 12);
+    gtk_widget_set_margin_end(grid, 12);
+    gtk_widget_set_margin_top(grid, 8);
+    gtk_widget_set_margin_bottom(grid, 8);
+    int row = 0;
+
+    /* Session ID */
+    GtkWidget *lbl;
+    lbl = gtk_label_new("Session:");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 1);
+    gtk_widget_add_css_class(lbl, "dim-label");
+    gtk_grid_attach(GTK_GRID(grid), lbl, 0, row, 1, 1);
+    lbl = gtk_label_new(win->ai_session_id);
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0);
+    gtk_label_set_selectable(GTK_LABEL(lbl), TRUE);
+    gtk_grid_attach(GTK_GRID(grid), lbl, 1, row++, 1, 1);
+
+    /* Started */
+    if (win->ai_session_start > 0) {
+        GDateTime *dt = g_date_time_new_from_unix_local(win->ai_session_start / G_USEC_PER_SEC);
+        if (dt) {
+            char *started = g_date_time_format(dt, "%Y-%m-%d %H:%M:%S");
+            lbl = gtk_label_new("Started:");
+            gtk_label_set_xalign(GTK_LABEL(lbl), 1);
+            gtk_widget_add_css_class(lbl, "dim-label");
+            gtk_grid_attach(GTK_GRID(grid), lbl, 0, row, 1, 1);
+            lbl = gtk_label_new(started);
+            gtk_label_set_xalign(GTK_LABEL(lbl), 0);
+            gtk_grid_attach(GTK_GRID(grid), lbl, 1, row++, 1, 1);
+
+            /* Duration */
+            GDateTime *now = g_date_time_new_now_local();
+            GTimeSpan span = g_date_time_difference(now, dt);
+            gint64 mins = span / G_TIME_SPAN_MINUTE;
+            char dur[64];
+            if (mins >= 60)
+                snprintf(dur, sizeof(dur), "%ldh %ldm", (long)(mins / 60), (long)(mins % 60));
+            else if (mins > 0)
+                snprintf(dur, sizeof(dur), "%ldm", (long)mins);
+            else
+                snprintf(dur, sizeof(dur), "%lds", (long)(span / G_TIME_SPAN_SECOND));
+            lbl = gtk_label_new("Duration:");
+            gtk_label_set_xalign(GTK_LABEL(lbl), 1);
+            gtk_widget_add_css_class(lbl, "dim-label");
+            gtk_grid_attach(GTK_GRID(grid), lbl, 0, row, 1, 1);
+            lbl = gtk_label_new(dur);
+            gtk_label_set_xalign(GTK_LABEL(lbl), 0);
+            gtk_grid_attach(GTK_GRID(grid), lbl, 1, row++, 1, 1);
+
+            g_free(started);
+            g_date_time_unref(now);
+            g_date_time_unref(dt);
+        }
+    }
+
+    /* Turns */
+    char turns[32];
+    snprintf(turns, sizeof(turns), "%d", win->ai_session_turns);
+    lbl = gtk_label_new("Turns:");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 1);
+    gtk_widget_add_css_class(lbl, "dim-label");
+    gtk_grid_attach(GTK_GRID(grid), lbl, 0, row, 1, 1);
+    lbl = gtk_label_new(turns);
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0);
+    gtk_grid_attach(GTK_GRID(grid), lbl, 1, row++, 1, 1);
+
+    /* Tokens */
+    char tok[64];
+    snprintf(tok, sizeof(tok), "%d in / %d out",
+             win->ai_input_tokens, win->ai_output_tokens);
+    lbl = gtk_label_new("Tokens:");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 1);
+    gtk_widget_add_css_class(lbl, "dim-label");
+    gtk_grid_attach(GTK_GRID(grid), lbl, 0, row, 1, 1);
+    lbl = gtk_label_new(tok);
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0);
+    gtk_grid_attach(GTK_GRID(grid), lbl, 1, row++, 1, 1);
+
+    /* Mode */
+    lbl = gtk_label_new("Mode:");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 1);
+    gtk_widget_add_css_class(lbl, "dim-label");
+    gtk_grid_attach(GTK_GRID(grid), lbl, 0, row, 1, 1);
+    lbl = gtk_label_new(win->settings.ai_streaming ? "interactive (streaming)" : "batch");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0);
+    gtk_grid_attach(GTK_GRID(grid), lbl, 1, row++, 1, 1);
+
+    gtk_popover_set_child(GTK_POPOVER(popover), grid);
+    gtk_popover_popup(GTK_POPOVER(popover));
+}
+
 /* ── Window close ── */
 
 static void on_close_request(GtkWindow *window, gpointer data) {
@@ -2736,6 +2845,7 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
 
     win->window = GTK_APPLICATION_WINDOW(gtk_application_window_new(app));
     gtk_window_set_title(GTK_WINDOW(win->window), "Vibe Light");
+    gtk_window_set_icon_name(GTK_WINDOW(win->window), "com.vibe.light");
     gtk_window_set_default_size(GTK_WINDOW(win->window),
                                  win->settings.window_width,
                                  win->settings.window_height);
@@ -2957,10 +3067,12 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     );
     ai_refresh_output(win);
 
-    /* Restore persisted session ID */
+    /* Restore persisted session ID + stats */
     if (win->settings.ai_last_session[0]) {
         g_strlcpy(win->ai_session_id, win->settings.ai_last_session,
                    sizeof(win->ai_session_id));
+        win->ai_session_start = win->settings.ai_session_start;
+        win->ai_session_turns = win->settings.ai_session_turns;
     }
 
     gtk_paned_set_start_child(GTK_PANED(ai_paned), GTK_WIDGET(win->ai_webview));
@@ -2982,6 +3094,7 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(prompt_scroll), GTK_WIDGET(win->prompt_view));
 
     GtkEventController *key_ctrl = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(key_ctrl, GTK_PHASE_CAPTURE);
     g_signal_connect(key_ctrl, "key-pressed", G_CALLBACK(on_prompt_key), win);
     gtk_widget_add_controller(GTK_WIDGET(win->prompt_view), key_ctrl);
 
@@ -3024,7 +3137,15 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     win->cursor_label = GTK_LABEL(gtk_label_new(""));
     gtk_widget_set_halign(GTK_WIDGET(win->cursor_label), GTK_ALIGN_END);
     gtk_widget_add_css_class(GTK_WIDGET(win->cursor_label), "dim-label");
-    gtk_box_append(GTK_BOX(status_bar), GTK_WIDGET(win->cursor_label));
+
+    /* Wrap cursor label in a clickable gesture for session info */
+    GtkWidget *cursor_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_append(GTK_BOX(cursor_box), GTK_WIDGET(win->cursor_label));
+    GtkGesture *cursor_click = gtk_gesture_click_new();
+    g_signal_connect(cursor_click, "pressed", G_CALLBACK(on_session_label_clicked), win);
+    gtk_widget_add_controller(cursor_box, GTK_EVENT_CONTROLLER(cursor_click));
+    gtk_widget_set_cursor_from_name(cursor_box, "pointer");
+    gtk_box_append(GTK_BOX(status_bar), cursor_box);
 
     /* Main layout: toast overlay > notebook + status bar */
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);

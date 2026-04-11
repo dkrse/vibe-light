@@ -475,11 +475,21 @@ void ai_parse_and_display(VibeWindow *win) {
         sp += strlen(sid_key);
         const char *se = strchr(sp, '"');
         if (se && (se - sp) < 127) {
+            char old_sid[128];
+            g_strlcpy(old_sid, win->ai_session_id, sizeof(old_sid));
             memcpy(win->ai_session_id, sp, se - sp);
             win->ai_session_id[se - sp] = '\0';
-            /* Persist session ID for resume after restart */
+            /* Track new session start */
+            if (strcmp(old_sid, win->ai_session_id) != 0) {
+                win->ai_session_start = g_get_real_time();
+                win->ai_session_turns = 0;
+            }
+            win->ai_session_turns++;
+            /* Persist session ID + stats for resume after restart */
             g_strlcpy(win->settings.ai_last_session, win->ai_session_id,
                        sizeof(win->settings.ai_last_session));
+            win->settings.ai_session_start = win->ai_session_start;
+            win->settings.ai_session_turns = win->ai_session_turns;
             settings_save(&win->settings);
         }
     }
@@ -722,6 +732,336 @@ gboolean ai_timer_tick(gpointer data) {
     return G_SOURCE_CONTINUE;
 }
 
+/* ── Streaming JSON helpers ── */
+
+/* Extract a JSON string value for a given key from a JSON line.
+ * Returns newly allocated string or NULL. Simple parser for flat objects. */
+static char *json_extract_string(const char *json, const char *key) {
+    char needle[256];
+    snprintf(needle, sizeof(needle), "\"%s\":\"", key);
+    const char *p = strstr(json, needle);
+    if (!p) return NULL;
+    p += strlen(needle);
+    GString *val = g_string_new(NULL);
+    while (*p && *p != '"') {
+        if (p[0] == '\\' && p[1]) {
+            switch (p[1]) {
+                case 'n': g_string_append_c(val, '\n'); break;
+                case 't': g_string_append_c(val, '\t'); break;
+                case 'r': g_string_append_c(val, '\r'); break;
+                case '"': g_string_append_c(val, '"'); break;
+                case '\\': g_string_append_c(val, '\\'); break;
+                case '/': g_string_append_c(val, '/'); break;
+                case 'u': {
+                    if (p[2] && p[3] && p[4] && p[5]) {
+                        char hex[5] = { p[2], p[3], p[4], p[5], 0 };
+                        gunichar cp = (gunichar)strtoul(hex, NULL, 16);
+                        if (cp >= 0xD800 && cp <= 0xDBFF &&
+                            p[6] == '\\' && p[7] == 'u') {
+                            char hex2[5] = { p[8], p[9], p[10], p[11], 0 };
+                            gunichar lo = (gunichar)strtoul(hex2, NULL, 16);
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                            p += 6;
+                        }
+                        char utf8[7];
+                        int len = g_unichar_to_utf8(cp, utf8);
+                        g_string_append_len(val, utf8, len);
+                        p += 6;
+                        continue;
+                    }
+                    g_string_append_c(val, p[1]);
+                    break;
+                }
+                default: g_string_append_c(val, p[1]); break;
+            }
+            p += 2;
+        } else {
+            g_string_append_c(val, *p);
+            p++;
+        }
+    }
+    return g_string_free(val, FALSE);
+}
+
+static int json_extract_int(const char *json, const char *key) {
+    char needle[256];
+    snprintf(needle, sizeof(needle), "\"%s\":", key);
+    const char *p = strstr(json, needle);
+    if (!p) return 0;
+    p += strlen(needle);
+    return atoi(p);
+}
+
+/* Finalize streaming response — extract metadata from accumulated buffer */
+static void ai_stream_finalize(VibeWindow *win) {
+    /* Stop elapsed timer */
+    if (win->ai_timer_id) {
+        g_source_remove(win->ai_timer_id);
+        win->ai_timer_id = 0;
+    }
+
+    g_string_append(win->ai_conversation_md, "\n\n");
+    ai_refresh_output(win);
+
+    /* The response_buf accumulated the last "result" line's JSON */
+    const char *json = win->ai_response_buf->str;
+
+    /* Extract session_id */
+    char *sid = json_extract_string(json, "session_id");
+    if (sid) {
+        if (strcmp(win->ai_session_id, sid) != 0) {
+            win->ai_session_start = g_get_real_time();
+            win->ai_session_turns = 0;
+        }
+        win->ai_session_turns++;
+        g_strlcpy(win->ai_session_id, sid, sizeof(win->ai_session_id));
+        g_strlcpy(win->settings.ai_last_session, sid, sizeof(win->settings.ai_last_session));
+        win->settings.ai_session_start = win->ai_session_start;
+        win->settings.ai_session_turns = win->ai_session_turns;
+        settings_save(&win->settings);
+        g_free(sid);
+    }
+
+    /* Extract model name from subkey pattern */
+    const char *mu = strstr(json, "\"model\":\"");
+    if (mu) {
+        mu += 9;
+        const char *me = strchr(mu, '"');
+        if (me && (me - mu) < 127) {
+            char model[128];
+            memcpy(model, mu, me - mu);
+            model[me - mu] = '\0';
+            gtk_label_set_text(win->ai_status_label, model);
+        }
+    }
+    update_status_bar(win);
+
+    /* Elapsed time */
+    gint64 now = g_get_monotonic_time();
+    win->ai_last_elapsed = (now - win->ai_start_time) / 1e6;
+
+    /* Token usage */
+    int req_in = json_extract_int(json, "inputTokens");
+    int req_out = json_extract_int(json, "outputTokens");
+    if (req_in) win->ai_input_tokens += req_in;
+    if (req_out) win->ai_output_tokens += req_out;
+
+    /* Update token label */
+    {
+        char in_s[16], out_s[16], tot_s[16], time_s[32];
+        int total = win->ai_input_tokens + win->ai_output_tokens;
+
+        #define FMT_TOK(buf, n) do { \
+            if ((n) >= 1000000) snprintf(buf, sizeof(buf), "%.1fM", (n)/1e6); \
+            else if ((n) >= 1000) snprintf(buf, sizeof(buf), "%.1fk", (n)/1e3); \
+            else snprintf(buf, sizeof(buf), "%d", (n)); \
+        } while(0)
+
+        FMT_TOK(in_s, win->ai_input_tokens);
+        FMT_TOK(out_s, win->ai_output_tokens);
+        FMT_TOK(tot_s, total);
+        #undef FMT_TOK
+
+        if (win->ai_last_elapsed >= 60.0)
+            snprintf(time_s, sizeof(time_s), "%.0fm%.0fs",
+                     win->ai_last_elapsed / 60.0,
+                     fmod(win->ai_last_elapsed, 60.0));
+        else
+            snprintf(time_s, sizeof(time_s), "%.1fs", win->ai_last_elapsed);
+
+        char tok_str[256];
+        snprintf(tok_str, sizeof(tok_str), "%s  |  in: %s  out: %s  total: %s",
+                 time_s, in_s, out_s, tot_s);
+        gtk_label_set_text(win->ai_token_label, tok_str);
+    }
+
+    /* Log prompt + response */
+    const char *log_session = win->ai_session_id[0] ? win->ai_session_id : NULL;
+    const char *log_model = gtk_label_get_text(win->ai_status_label);
+    if (win->ai_last_prompt) {
+        prompt_log_input(win->root_dir, log_session, log_model, win->ai_last_prompt);
+        g_free(win->ai_last_prompt);
+        win->ai_last_prompt = NULL;
+    }
+    /* Log the full result text that was streamed */
+    char *result_for_log = json_extract_string(json, "result");
+    if (result_for_log) {
+        prompt_log_output(win->root_dir, log_session, log_model,
+                          result_for_log, req_in, req_out, win->ai_last_elapsed);
+        g_free(result_for_log);
+    }
+
+    g_clear_object(&win->ai_stream);
+    g_clear_object(&win->ai_proc);
+}
+
+/* Debounce timer for streaming refresh — avoids re-rendering on every tiny delta */
+static guint ai_stream_refresh_id = 0;
+
+static gboolean ai_stream_refresh_tick(gpointer data) {
+    VibeWindow *win = data;
+    ai_stream_refresh_id = 0;
+    ai_refresh_output(win);
+    return G_SOURCE_REMOVE;
+}
+
+void on_ai_stream_line_ready(GObject *src, GAsyncResult *res, gpointer data) {
+    VibeWindow *win = data;
+    gsize len = 0;
+    GError *err = NULL;
+    char *line = g_data_input_stream_read_line_finish(
+        G_DATA_INPUT_STREAM(src), res, &len, &err);
+
+    if (err) {
+        if (!g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+            g_string_append_printf(win->ai_conversation_md,
+                "\n\n**Error:** %s\n\n", err->message);
+            ai_refresh_output(win);
+        }
+        g_error_free(err);
+        if (win->ai_timer_id) { g_source_remove(win->ai_timer_id); win->ai_timer_id = 0; }
+        gtk_label_set_text(win->ai_status_label, "error");
+        g_clear_object(&win->ai_stream);
+        g_clear_object(&win->ai_proc);
+        return;
+    }
+
+    if (!line) {
+        /* EOF — process exited */
+        /* Check if we got a result event; if not, check for session expiry */
+        if (win->ai_response_buf->len == 0 && win->ai_session_id[0]) {
+            /* Possibly expired session — retry */
+            win->ai_session_id[0] = '\0';
+            win->settings.ai_last_session[0] = '\0';
+            settings_save(&win->settings);
+            g_clear_object(&win->ai_stream);
+            g_clear_object(&win->ai_proc);
+            if (win->ai_last_prompt) {
+                g_string_append(win->ai_conversation_md,
+                    "\n\n*Session expired, starting new session...*\n\n");
+                ai_refresh_output(win);
+                gtk_text_buffer_set_text(win->prompt_buffer, win->ai_last_prompt, -1);
+                g_free(win->ai_last_prompt);
+                win->ai_last_prompt = NULL;
+                send_prompt_to_ai(win);
+            }
+            return;
+        }
+        ai_stream_finalize(win);
+        return;
+    }
+
+    /* Process stream-json event line */
+    if (!win->ai_conversation_md)
+        win->ai_conversation_md = g_string_new(NULL);
+
+    /* Detect event type — stream_event wraps content_block_delta with nested delta.text */
+    if (strstr(line, "\"text_delta\"")) {
+        /* Extract text from: ..."delta":{"type":"text_delta","text":"XXX"} */
+        const char *marker = strstr(line, "\"text_delta\",\"text\":\"");
+        if (marker) {
+            marker += strlen("\"text_delta\",\"text\":\"");
+            /* Parse the JSON string value in-place */
+            GString *delta = g_string_new(NULL);
+            const char *p = marker;
+            while (*p && *p != '"') {
+                if (p[0] == '\\' && p[1]) {
+                    switch (p[1]) {
+                        case 'n': g_string_append_c(delta, '\n'); break;
+                        case 't': g_string_append_c(delta, '\t'); break;
+                        case '"': g_string_append_c(delta, '"'); break;
+                        case '\\': g_string_append_c(delta, '\\'); break;
+                        case '/': g_string_append_c(delta, '/'); break;
+                        case 'u': {
+                            if (p[2] && p[3] && p[4] && p[5]) {
+                                char hex[5] = { p[2], p[3], p[4], p[5], 0 };
+                                gunichar cp = (gunichar)strtoul(hex, NULL, 16);
+                                if (cp >= 0xD800 && cp <= 0xDBFF &&
+                                    p[6] == '\\' && p[7] == 'u') {
+                                    char hex2[5] = { p[8], p[9], p[10], p[11], 0 };
+                                    gunichar lo = (gunichar)strtoul(hex2, NULL, 16);
+                                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                    p += 6;
+                                }
+                                char utf8[7];
+                                int ulen = g_unichar_to_utf8(cp, utf8);
+                                g_string_append_len(delta, utf8, ulen);
+                                p += 6;
+                                continue;
+                            }
+                            g_string_append_c(delta, p[1]);
+                            break;
+                        }
+                        default: g_string_append_c(delta, p[1]); break;
+                    }
+                    p += 2;
+                } else {
+                    g_string_append_c(delta, *p);
+                    p++;
+                }
+            }
+            if (delta->len > 0) {
+                g_string_append(win->ai_conversation_md, delta->str);
+                if (ai_stream_refresh_id == 0)
+                    ai_stream_refresh_id = g_timeout_add(150, ai_stream_refresh_tick, win);
+            }
+            g_string_free(delta, TRUE);
+        }
+    } else if (strstr(line, "\"type\":\"result\"")) {
+        /* Final event — store full JSON for metadata extraction */
+        g_string_truncate(win->ai_response_buf, 0);
+        g_string_append_len(win->ai_response_buf, line, len);
+        /* Force final refresh */
+        if (ai_stream_refresh_id) {
+            g_source_remove(ai_stream_refresh_id);
+            ai_stream_refresh_id = 0;
+        }
+
+        /* Check for error result — e.g. invalid session */
+        if (strstr(line, "\"is_error\":true")) {
+            /* Check if session expired */
+            if (strstr(line, "No conversation found") && win->ai_session_id[0]) {
+                win->ai_session_id[0] = '\0';
+                win->settings.ai_last_session[0] = '\0';
+                settings_save(&win->settings);
+                g_free(line);
+                g_clear_object(&win->ai_stream);
+                g_clear_object(&win->ai_proc);
+                if (win->ai_timer_id) { g_source_remove(win->ai_timer_id); win->ai_timer_id = 0; }
+                if (win->ai_last_prompt) {
+                    g_string_append(win->ai_conversation_md,
+                        "\n\n*Session expired, starting new session...*\n\n");
+                    ai_refresh_output(win);
+                    gtk_text_buffer_set_text(win->prompt_buffer, win->ai_last_prompt, -1);
+                    g_free(win->ai_last_prompt);
+                    win->ai_last_prompt = NULL;
+                    send_prompt_to_ai(win);
+                }
+                return;
+            }
+            /* Generic error */
+            char *errmsg = json_extract_string(line, "result");
+            g_string_append_printf(win->ai_conversation_md,
+                "\n\n**Error:** %s\n\n", errmsg ? errmsg : "Unknown error");
+            g_free(errmsg);
+            ai_refresh_output(win);
+            if (win->ai_timer_id) { g_source_remove(win->ai_timer_id); win->ai_timer_id = 0; }
+            gtk_label_set_text(win->ai_status_label, "error");
+            g_free(line);
+            g_clear_object(&win->ai_stream);
+            g_clear_object(&win->ai_proc);
+            return;
+        }
+    }
+    /* Ignore other event types (system, message_start, content_block_start, etc.) */
+
+    g_free(line);
+
+    /* Request next line */
+    g_data_input_stream_read_line_async(win->ai_stream,
+        G_PRIORITY_DEFAULT, win->cancellable, on_ai_stream_line_ready, win);
+}
+
 void send_prompt_to_ai(VibeWindow *win) {
     GtkTextIter start, end;
     gtk_text_buffer_get_bounds(win->prompt_buffer, &start, &end);
@@ -780,19 +1120,27 @@ void send_prompt_to_ai(VibeWindow *win) {
         }
     }
     g_ptr_array_add(argv, (gpointer)"--output-format");
-    g_ptr_array_add(argv, (gpointer)"json");
-    /* Add only the tools the user has enabled */
-    gboolean any_tool = win->settings.ai_tool_read || win->settings.ai_tool_edit ||
-                         win->settings.ai_tool_write || win->settings.ai_tool_glob ||
-                         win->settings.ai_tool_grep || win->settings.ai_tool_bash;
-    if (any_tool) {
-        g_ptr_array_add(argv, (gpointer)"--allowed-tools");
-        if (win->settings.ai_tool_edit)  g_ptr_array_add(argv, (gpointer)"Edit");
-        if (win->settings.ai_tool_write) g_ptr_array_add(argv, (gpointer)"Write");
-        if (win->settings.ai_tool_read)  g_ptr_array_add(argv, (gpointer)"Read");
-        if (win->settings.ai_tool_glob)  g_ptr_array_add(argv, (gpointer)"Glob");
-        if (win->settings.ai_tool_grep)  g_ptr_array_add(argv, (gpointer)"Grep");
-        if (win->settings.ai_tool_bash)  g_ptr_array_add(argv, (gpointer)"Bash");
+    if (win->settings.ai_streaming) {
+        g_ptr_array_add(argv, (gpointer)"stream-json");
+        g_ptr_array_add(argv, (gpointer)"--verbose");
+        g_ptr_array_add(argv, (gpointer)"--include-partial-messages");
+    } else {
+        g_ptr_array_add(argv, (gpointer)"json");
+    }
+    /* Add only the tools the user has enabled (only when auto-accept is on) */
+    if (win->settings.ai_auto_accept) {
+        gboolean any_tool = win->settings.ai_tool_read || win->settings.ai_tool_edit ||
+                             win->settings.ai_tool_write || win->settings.ai_tool_glob ||
+                             win->settings.ai_tool_grep || win->settings.ai_tool_bash;
+        if (any_tool) {
+            g_ptr_array_add(argv, (gpointer)"--allowed-tools");
+            if (win->settings.ai_tool_edit)  g_ptr_array_add(argv, (gpointer)"Edit");
+            if (win->settings.ai_tool_write) g_ptr_array_add(argv, (gpointer)"Write");
+            if (win->settings.ai_tool_read)  g_ptr_array_add(argv, (gpointer)"Read");
+            if (win->settings.ai_tool_glob)  g_ptr_array_add(argv, (gpointer)"Glob");
+            if (win->settings.ai_tool_grep)  g_ptr_array_add(argv, (gpointer)"Grep");
+            if (win->settings.ai_tool_bash)  g_ptr_array_add(argv, (gpointer)"Bash");
+        }
     }
     g_ptr_array_add(argv, NULL);
 
@@ -837,9 +1185,17 @@ void send_prompt_to_ai(VibeWindow *win) {
         win->ai_response_buf = g_string_new(NULL);
     g_string_truncate(win->ai_response_buf, 0);
 
-    /* Read all stdout async — fires callback when process exits */
-    g_subprocess_communicate_async(win->ai_proc, NULL, win->cancellable,
-                                    on_ai_communicate_done, win);
+    if (win->settings.ai_streaming) {
+        /* Streaming mode: read stdout line-by-line as events arrive */
+        GInputStream *stdout_pipe = g_subprocess_get_stdout_pipe(win->ai_proc);
+        win->ai_stream = g_data_input_stream_new(stdout_pipe);
+        g_data_input_stream_read_line_async(win->ai_stream,
+            G_PRIORITY_DEFAULT, win->cancellable, on_ai_stream_line_ready, win);
+    } else {
+        /* Batch mode: read all stdout when process exits */
+        g_subprocess_communicate_async(win->ai_proc, NULL, win->cancellable,
+                                        on_ai_communicate_done, win);
+    }
 
     gtk_text_buffer_set_text(win->prompt_buffer, "", -1);
     g_free(text);
