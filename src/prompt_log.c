@@ -62,11 +62,15 @@ static void append_entry(const char *root_dir, const char *json_entry) {
     char jpath[2200];
     get_log_path(jpath, sizeof(jpath), root_dir);
 
+    /* Atomic write via temp file + rename to prevent corruption on crash */
+    char tmppath[2300];
+    snprintf(tmppath, sizeof(tmppath), "%s.tmp", jpath);
+
     char *existing = NULL;
     gsize len = 0;
     gboolean have_file = g_file_get_contents(jpath, &existing, &len, NULL);
 
-    FILE *f = fopen(jpath, "w");
+    FILE *f = fopen(tmppath, "w");
     if (!f) { g_free(existing); return; }
     fchmod(fileno(f), 0600);
 
@@ -84,6 +88,9 @@ static void append_entry(const char *root_dir, const char *json_entry) {
 
     fclose(f);
     g_free(existing);
+
+    /* Atomic replace — if rename fails, tmp stays but original is intact */
+    rename(tmppath, jpath);
 }
 
 /* ── Internal: get ISO 8601 timestamp ── */

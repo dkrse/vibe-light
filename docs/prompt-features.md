@@ -66,7 +66,7 @@ When disabled, a system prompt restricts Claude to the terminal's current workin
 
 ### Streaming Mode
 
-- **Interactive streaming** (default) -- uses `--output-format stream-json`. Responses stream in real-time, line-by-line via `GDataInputStream`. Text appears as it's generated with 150ms debounced refresh.
+- **Interactive streaming** (default) -- uses `--output-format stream-json`. Responses stream in real-time, line-by-line via `GDataInputStream`. Text deltas appended directly to WebKit DOM via JS (`insertAdjacentText`) for performance. Full cmark-gfm markdown re-render on stream completion.
 - **Batch mode** -- uses `--output-format json`. Waits for the complete response before displaying.
 
 ### Markdown Rendering
@@ -77,8 +77,13 @@ When enabled, AI responses are rendered as full HTML via WebKitWebView + cmark-g
 - Blockquotes, lists, strikethrough, horizontal rules
 - LaTeX to Unicode conversion (e.g. `$\sum$` -> summation, `$E = mc^2$` -> superscript)
 - Theme-aware CSS (dark/light automatically matches app theme)
+- HTML sanitized -- `CMARK_OPT_UNSAFE` is not used, raw HTML in AI responses is escaped
 
 When disabled, raw text is displayed.
+
+## Conversation Memory
+
+The conversation buffer (`ai_conversation_md`) is capped at 256KB. When the buffer exceeds this limit, the first half is trimmed at the nearest newline boundary, and a `"(earlier conversation trimmed)"` marker is prepended. This prevents unbounded RAM growth during long AI sessions while preserving the most recent context.
 
 ## Session Management
 
@@ -121,7 +126,7 @@ All prompts and responses are logged to `{project}/.LLM/prompts.json`:
 ]
 ```
 
-Input entries are logged after the response arrives so that model and session metadata are accurate.
+Input entries are logged after the response arrives so that model and session metadata are accurate. Writes are atomic (temp file + `rename()`) to prevent corruption on crash.
 
 ### Token Tracking
 

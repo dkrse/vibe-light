@@ -352,7 +352,7 @@ All operations show toast notifications on success/failure. Remote files are blo
 ## AI Assistant
 
 - Spawns `claude -p "prompt" --output-format stream-json` (streaming) or `--output-format json` (batch) via GSubprocess
-- **Streaming mode** reads stdout line-by-line via `GDataInputStream`, processes `text_delta` events (append to conversation markdown) and `result` events (extract metadata). Refresh debounced at 150ms to avoid excessive re-rendering.
+- **Streaming mode** reads stdout line-by-line via `GDataInputStream`, processes `text_delta` events (JS DOM append via `insertAdjacentText` for performance) and `result` events (extract metadata + full cmark re-render).
 - **Batch mode** reads all stdout when process exits (legacy behavior)
 - Session continuity via `--resume SESSION_ID`
 - Token tracking: input/output/total with dynamic formatting (k/M suffixes)
@@ -362,13 +362,14 @@ All operations show toast notifications on success/failure. Remote files are blo
 - **Tool-use confirmation dialogs** (streaming mode) -- `tool_use` events in stream-json intercepted, modal dialog shown with tool name and key parameters. Auto-accept ON + tool enabled = skip dialog; auto-accept ON + tool disabled = dialog; auto_accept OFF = always dialog. Deny kills the subprocess. In streaming mode all 6 tools are always passed via `--allowed-tools` to prevent CLI stdin blocking; GUI handles the approval flow.
 - Markdown toggle: switch between HTML rendering and raw text output (`ai_markdown` setting)
 - CWD restriction: optional system prompt restricting file access to terminal's CWD
-- **HTML markdown rendering** via WebKitWebView: cmark-gfm parses markdown to HTML, rendered with dark/light CSS matching the app theme. LaTeX expressions (`$...$`, `$$...$$`) converted to Unicode (e.g. `\sum` → `∑`, `^2` → `²`). Hardware acceleration disabled for GPU-less environments.
+- **HTML markdown rendering** via WebKitWebView: cmark-gfm parses markdown to HTML (without `CMARK_OPT_UNSAFE` — raw HTML sanitized), rendered with dark/light CSS matching the app theme. LaTeX expressions (`$...$`, `$$...$$`) converted to Unicode (e.g. `\sum` → `∑`, `^2` → `²`). Hardware acceleration disabled for GPU-less environments.
+- **Conversation memory cap** -- `ai_conversation_md` GString capped at 256KB; first half trimmed at nearest newline when exceeded. Prevents OOM in long sessions.
 - Full support for tables, code blocks, headings, bold, italic, links, blockquotes, lists, strikethrough, horizontal rules
 - **LaTeX \text{} support** -- `\text{}`, `\mathrm{}`, `\textbf{}`, `\mathbf{}` render as plain text; `\frac{a}{b}` renders as `(a)/(b)` with recursive processing
 - **Session persistence** -- session ID, start time, and turn count saved to settings.conf, restored on startup, auto-cleared when expired
 - **Session info popover** -- clicking session label in status bar shows session ID, started date/time, duration, turns, tokens, and mode
 - **Error handling** -- stderr captured, exit codes checked, empty/malformed responses reported in conversation
-- **Conversation logging** via `prompt_log.c` -- both input and output entries logged to `.LLM/prompts.json` with model, session, token counts, elapsed time. Input deferred until response arrives so model/session are accurate.
+- **Conversation logging** via `prompt_log.c` -- both input and output entries logged to `.LLM/prompts.json` with model, session, token counts, elapsed time. Input deferred until response arrives so model/session are accurate. Writes are atomic (temp file + `rename()`).
 
 ## Terminal
 
@@ -459,5 +460,11 @@ INI-style sections at `~/.config/vibe-light/connections.conf`.
 - Background threads receive copied SSH parameters (not pointers to `VibeWindow`) to avoid race conditions with disconnect
 - Guard flags prevent accumulation of overlapping async polls on slow networks
 - `count_entries` uses `lstat` (no symlink following) and depth limit (64) to prevent infinite recursion
+- `delete_recursive` uses `lstat` to detect symlinks — removes them with `unlink()` instead of following (prevents traversal outside target directory)
 - File size capped at 10 MB to prevent OOM
+- AI conversation buffer capped at 256KB to prevent OOM in long sessions
 - Lazy loading caps directory display at 500 entries per batch
+- Font CSS generated via `g_strdup_printf` (heap-allocated, no fixed buffer truncation)
+- Prompt log uses atomic writes (temp file + `rename()`) to prevent corruption on crash
+- Remote directory `cd` command escapes single quotes to prevent shell injection
+- cmark-gfm runs without `CMARK_OPT_UNSAFE` — raw HTML in AI responses is sanitized

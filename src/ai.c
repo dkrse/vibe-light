@@ -347,7 +347,7 @@ void ai_refresh_output(VibeWindow *win) {
 
             /* Step 2: Parse with cmark-gfm to HTML */
             cmark_gfm_core_extensions_ensure_registered();
-            cmark_parser *parser = cmark_parser_new(CMARK_OPT_DEFAULT | CMARK_OPT_UNSAFE);
+            cmark_parser *parser = cmark_parser_new(CMARK_OPT_DEFAULT);
             const char *ext_names[] = {"table", "strikethrough", "autolink", NULL};
             for (int i = 0; ext_names[i]; i++) {
                 cmark_syntax_extension *ext = cmark_find_syntax_extension(ext_names[i]);
@@ -355,7 +355,7 @@ void ai_refresh_output(VibeWindow *win) {
             }
             cmark_parser_feed(parser, safe->str, safe->len);
             cmark_node *doc = cmark_parser_finish(parser);
-            char *rendered = cmark_render_html(doc, CMARK_OPT_DEFAULT | CMARK_OPT_UNSAFE,
+            char *rendered = cmark_render_html(doc, CMARK_OPT_DEFAULT,
                                               cmark_parser_get_syntax_extensions(parser));
 
             /* Step 3: Replace MATHPH placeholders with Unicode-rendered LaTeX (single pass) */
@@ -1066,15 +1066,8 @@ static void ai_stream_finalize(VibeWindow *win) {
     g_clear_object(&win->ai_proc);
 }
 
-/* Debounce timer for streaming refresh — avoids re-rendering on every tiny delta */
+/* Guard for pending stream refresh timer (cleaned up on result event) */
 static guint ai_stream_refresh_id = 0;
-
-static gboolean ai_stream_refresh_tick(gpointer data) {
-    VibeWindow *win = data;
-    ai_stream_refresh_id = 0;
-    ai_refresh_output(win);
-    return G_SOURCE_REMOVE;
-}
 
 void on_ai_stream_line_ready(GObject *src, GAsyncResult *res, gpointer data) {
     VibeWindow *win = data;
@@ -1219,9 +1212,35 @@ void on_ai_stream_line_ready(GObject *src, GAsyncResult *res, gpointer data) {
                 }
             }
             if (delta->len > 0) {
+                /* Cap conversation at 256KB — trim first half when exceeded */
+                #define AI_CONVERSATION_MAX (256 * 1024)
+                if (win->ai_conversation_md->len + delta->len > AI_CONVERSATION_MAX) {
+                    gsize half = win->ai_conversation_md->len / 2;
+                    /* Find a newline near the midpoint to trim cleanly */
+                    const char *nl = memchr(win->ai_conversation_md->str + half, '\n',
+                                            win->ai_conversation_md->len - half);
+                    gsize trim_at = nl ? (gsize)(nl - win->ai_conversation_md->str + 1) : half;
+                    g_string_erase(win->ai_conversation_md, 0, trim_at);
+                    g_string_prepend(win->ai_conversation_md, "*… (earlier conversation trimmed) …*\n\n");
+                }
                 g_string_append(win->ai_conversation_md, delta->str);
-                if (ai_stream_refresh_id == 0)
-                    ai_stream_refresh_id = g_timeout_add(150, ai_stream_refresh_tick, win);
+                /* Streaming: append delta text via JS for performance instead of
+                 * full cmark re-render.  Full render happens on stream finalize. */
+                char *escaped_js = g_markup_escape_text(delta->str, -1);
+                /* Also escape backslashes and quotes for JS string literal */
+                GString *js = g_string_new("(function(){var t=document.getElementById('_stream');if(!t){t=document.createElement('span');t.id='_stream';document.body.appendChild(t);}t.insertAdjacentText('beforeend','");
+                for (const char *c = escaped_js; *c; c++) {
+                    if (*c == '\\') g_string_append(js, "\\\\");
+                    else if (*c == '\'') g_string_append(js, "\\'");
+                    else if (*c == '\n') g_string_append(js, "\\n");
+                    else if (*c == '\r') g_string_append(js, "\\r");
+                    else g_string_append_c(js, *c);
+                }
+                g_string_append(js, "');window.scrollTo(0,document.body.scrollHeight);})()");
+                webkit_web_view_evaluate_javascript(win->ai_webview, js->str, -1,
+                                                     NULL, NULL, NULL, NULL, NULL);
+                g_string_free(js, TRUE);
+                g_free(escaped_js);
             }
             g_string_free(delta, TRUE);
         }

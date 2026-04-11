@@ -4,7 +4,7 @@
 
 ### Features
 
-- **Interactive streaming output** -- AI responses now stream in real-time (line-by-line via `stream-json` format) instead of waiting for the complete response. Text appears as it's generated with 150ms debounced refresh. Configurable in AI Model dialog (toggle between interactive streaming and batch mode).
+- **Interactive streaming output** -- AI responses now stream in real-time (line-by-line via `stream-json` format) instead of waiting for the complete response. Text appears as it's generated via JS DOM append (`insertAdjacentText`), with full cmark markdown re-render on stream completion. Configurable in AI Model dialog (toggle between interactive streaming and batch mode).
 - **Tool-use confirmation dialogs** -- in streaming mode, tool_use events are intercepted and shown in a modal GTK dialog with tool name, key parameters (file_path, command, pattern, etc.), and Allow/Deny buttons. Logic: auto_accept ON + tool enabled = auto-allow; auto_accept ON + tool disabled = dialog; auto_accept OFF = always dialog. Deny kills the AI process. Parameters displayed as compact markup labels (no raw JSON), long values truncated at 200 chars.
 - **Auto-accept allowed tools** -- new toggle in AI Model dialog; when off, every tool use shows a confirmation dialog instead of auto-accepting
 - **Session info popover** -- click session label in status bar (AI tab) to see session ID (selectable), started date/time, duration, turns count, token usage (in/out), and mode (streaming/batch)
@@ -12,6 +12,23 @@
 - **Application icon** -- window icon set via `gtk_window_set_icon_name("com.vibe.light")` with icons at 16/32/48/64/128/256px + scalable SVG
 - **Desktop entry** -- `com.vibe.light.desktop` for system application launcher integration
 - **Prompt key capture fix** -- key controller set to `GTK_PHASE_CAPTURE` so Enter/Ctrl+Enter handling works reliably in prompt view
+
+### Performance
+
+- **Streaming JS append** -- during streaming, text deltas appended directly to WebKit DOM via `webkit_web_view_evaluate_javascript` + `insertAdjacentText`. Full cmark-gfm re-render only on stream finalize. Eliminates O(n) re-parse on every delta for long conversations.
+- **Conversation memory cap** -- `ai_conversation_md` capped at 256KB. When exceeded, first half trimmed at nearest newline with `"(earlier conversation trimmed)"` marker. Prevents unbounded RAM growth in long sessions.
+- **Font CSS heap allocation** -- `font_css` switched from 8KB stack buffer to `g_strdup_printf` (heap). Prevents truncation with very long font family names.
+
+### Security
+
+- **XSS prevention** -- removed `CMARK_OPT_UNSAFE` from cmark-gfm parser and renderer. Raw HTML in AI responses is now sanitized (escaped) instead of passed through to WebKit.
+- **Symlink-safe delete** -- `delete_recursive()` now checks `S_ISLNK` via `lstat` and removes symlinks with `unlink()` instead of following them. Prevents accidental deletion outside the target directory.
+- **Shell escape in remote cd** -- `cd` command sent to terminal now escapes single quotes (`'` → `'\''`) via GString builder instead of bare `snprintf`. Prevents shell injection from directory names containing quotes.
+- **Atomic prompt log writes** -- `prompt_log.c` now writes to a `.tmp` file and `rename()`s into place. Prevents `prompts.json` corruption if the app crashes mid-write.
+
+### Bug Fixes
+
+- **Remote refresh race condition** -- `remote_refresh_thread` now copies all SSH parameters (`ssh_host`, `ssh_user`, `ssh_port`, `ssh_key`, `ssh_ctl_path`, `ssh_mount`, `ssh_remote_path`) into `RemoteRefreshCtx` instead of reading from `VibeWindow` in the background thread. Prevents use-after-free if SFTP disconnects during a pending refresh.
 
 ### Architecture
 

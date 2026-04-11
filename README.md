@@ -2,11 +2,6 @@
 
 A lightweight file browser, terminal, and AI assistant built with GTK4, libadwaita, and GtkSourceView. Includes SFTP/SSH support for remote file browsing, syntax highlighting for 200+ languages, and git status integration.
 
-![Files tab](screenshots/01.png)
-![Terminal tab](screenshots/02.png)
-![AI tab](screenshots/03.png)
-![Settings](screenshots/04.png)
-
 ## Features
 
 - **File Browser** -- Navigate directories with git status colors, context menu (rename, delete, new file/dir), drag & drop
@@ -163,8 +158,8 @@ SSH connections use ControlMaster multiplexing for efficient reuse of a single T
 Built-in integration with Claude CLI (`claude` command):
 
 - Send prompts and view responses in a dedicated tab
-- **Interactive streaming** -- responses stream in real-time as they're generated (configurable: streaming or batch mode)
-- **Full HTML markdown rendering** -- WebKitWebView with cmark-gfm: tables, code blocks, headings, bold, italic, links, blockquotes, lists, horizontal rules
+- **Interactive streaming** -- responses stream in real-time via JS DOM append (configurable: streaming or batch mode), full markdown re-render on completion
+- **Full HTML markdown rendering** -- WebKitWebView with cmark-gfm (HTML sanitized): tables, code blocks, headings, bold, italic, links, blockquotes, lists, horizontal rules
 - **LaTeX to Unicode** -- math expressions like `$E = mc^2$` rendered as `E = mc²`, `$\sum$` as `∑`
 - **Theme-aware** -- AI output follows app theme (dark/light CSS)
 - Session continuity via `--resume` with automatic session persistence across restarts
@@ -174,7 +169,8 @@ Built-in integration with Claude CLI (`claude` command):
 - Configurable tool access (Read, Edit, Write, Glob, Grep, Bash) with auto-accept toggle and GUI confirmation dialogs for unapproved tools
 - **Markdown toggle** -- switch between HTML markdown rendering and raw text output
 - Optional CWD restriction for security
-- **Conversation logging** to `.LLM/prompts.json` with model, session, tokens, timestamps
+- **Conversation memory cap** -- conversation buffer capped at 256KB, oldest half trimmed automatically
+- **Conversation logging** to `.LLM/prompts.json` with model, session, tokens, timestamps (atomic writes via temp+rename)
 
 ## Prompt Log Format
 

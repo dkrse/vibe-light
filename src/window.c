@@ -163,8 +163,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
     MAKE_RGBA(fg_editor, win->settings.editor_font_intensity);
     #undef MAKE_RGBA
 
-    char font_css[8192];
-    snprintf(font_css, sizeof(font_css),
+    char *font_css = g_strdup_printf(
              /* GUI font — headerbar, tabs, labels, menus, dialogs, status bar */
              "window,headerbar,.titlebar{font-family:%s;font-size:%dpt;}"
              "headerbar button,headerbar menubutton button,headerbar menubutton"
@@ -216,6 +215,7 @@ void vibe_window_apply_settings(VibeWindow *win) {
     char *full_css = g_strconcat(theme_css, font_css, NULL);
     gtk_css_provider_load_from_string(win->css_provider, full_css);
     g_free(full_css);
+    g_free(font_css);
 
     /* status bar */
     update_status_bar(win);
@@ -1077,21 +1077,28 @@ typedef struct {
     char        local_dir[4096];
     char        current_dir_snapshot[2048]; /* to verify dir didn't change */
     GPtrArray  *expanded;    /* paths to re-expand, owned */
+    /* SSH params snapshot (thread safety — avoid reading win-> from thread) */
+    char        ssh_host[256];
+    char        ssh_user[128];
+    int         ssh_port;
+    char        ssh_key[1024];
+    char        ssh_ctl_path[512];
+    char        ssh_mount[2048];
+    char        ssh_remote_path[1024];
 } RemoteRefreshCtx;
 
 static void remote_refresh_thread(GTask *task, gpointer src, gpointer data,
                                    GCancellable *cancel) {
     (void)src; (void)cancel;
     RemoteRefreshCtx *ctx = data;
-    VibeWindow *win = ctx->win;
 
-    /* Build SSH argv from win — safe because we only read immutable-during-connection fields
-       (ssh_host/user/port/key/ctl_path don't change while connected) */
-    GPtrArray *av = ssh_argv_from_params(win->ssh_host, win->ssh_user,
-                                          win->ssh_port, win->ssh_key,
-                                          win->ssh_ctl_path);
+    /* Use copied SSH params — safe from race with disconnect on main thread */
+    GPtrArray *av = ssh_argv_from_params(ctx->ssh_host, ctx->ssh_user,
+                                          ctx->ssh_port, ctx->ssh_key,
+                                          ctx->ssh_ctl_path);
     char remote[4096];
-    to_remote_path(win, ctx->local_dir, remote, sizeof(remote));
+    ssh_to_remote_path(ctx->ssh_mount, ctx->ssh_remote_path,
+                       ctx->local_dir, remote, sizeof(remote));
 
     g_ptr_array_add(av, g_strdup("--"));
     g_ptr_array_add(av, g_strdup("ls"));
@@ -1181,6 +1188,13 @@ static gboolean fs_refresh_cb(gpointer data) {
         ctx->win = win;
         g_strlcpy(ctx->local_dir, path, sizeof(ctx->local_dir));
         g_strlcpy(ctx->current_dir_snapshot, path, sizeof(ctx->current_dir_snapshot));
+        g_strlcpy(ctx->ssh_host, win->ssh_host, sizeof(ctx->ssh_host));
+        g_strlcpy(ctx->ssh_user, win->ssh_user, sizeof(ctx->ssh_user));
+        ctx->ssh_port = win->ssh_port;
+        g_strlcpy(ctx->ssh_key, win->ssh_key, sizeof(ctx->ssh_key));
+        g_strlcpy(ctx->ssh_ctl_path, win->ssh_ctl_path, sizeof(ctx->ssh_ctl_path));
+        g_strlcpy(ctx->ssh_mount, win->ssh_mount, sizeof(ctx->ssh_mount));
+        g_strlcpy(ctx->ssh_remote_path, win->ssh_remote_path, sizeof(ctx->ssh_remote_path));
         ctx->expanded = collect_expanded_paths(win);
 
         GTask *task = g_task_new(NULL, NULL, remote_refresh_done, ctx);
@@ -1905,6 +1919,10 @@ static void on_ctx_rename(GSimpleAction *act, GVariant *param, gpointer data) {
 static gboolean delete_recursive(const char *path) {
     struct stat st;
     if (lstat(path, &st) != 0) return FALSE;
+
+    /* Don't follow symlinks — just remove the link itself */
+    if (S_ISLNK(st.st_mode))
+        return unlink(path) == 0;
 
     if (S_ISDIR(st.st_mode)) {
         DIR *d = opendir(path);
@@ -2698,10 +2716,17 @@ static void on_remote_dir_open(GtkButton *btn, gpointer data) {
              "/tmp/vibe-light-sftp-%d-%s@%s", (int)getpid(), win->ssh_user, win->ssh_host);
     g_strlcpy(win->root_dir, win->ssh_mount, sizeof(win->root_dir));
 
-    /* send cd to existing terminal session */
-    char cd_cmd[4200];
-    snprintf(cd_cmd, sizeof(cd_cmd), "cd '%s'\n", ctx->current_remote);
-    vte_terminal_feed_child(win->terminal, cd_cmd, strlen(cd_cmd));
+    /* send cd to existing terminal session — escape single quotes for shell safety */
+    GString *cd_cmd = g_string_new("cd '");
+    for (const char *c = ctx->current_remote; *c; c++) {
+        if (*c == '\'')
+            g_string_append(cd_cmd, "'\\''");
+        else
+            g_string_append_c(cd_cmd, *c);
+    }
+    g_string_append(cd_cmd, "'\n");
+    vte_terminal_feed_child(win->terminal, cd_cmd->str, cd_cmd->len);
+    g_string_free(cd_cmd, TRUE);
 
     gtk_window_destroy(ctx->dialog);
 
