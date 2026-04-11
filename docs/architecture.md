@@ -23,15 +23,20 @@ Vibe Light is a lightweight GTK4/libadwaita desktop application written in C17. 
 src/
   main.c         (~16 lines)     Entry point, AdwApplication setup
   window.h       (~118 lines)    VibeWindow struct, public API
-  window.c       (~3221 lines)   Window construction, apply_settings,
-                                  file browser, git status integration,
+  window.c       (~3000 lines)   Window construction, apply_settings,
+                                  file browser tree, git status integration,
                                   lazy loading, async file loading,
                                   file system monitoring (local + remote),
-                                  context menu (rename/delete/new),
-                                  drag & drop, toast notifications,
-                                  session restore, remote dir chooser,
-                                  terminal spawn, status bar,
+                                  drag & drop (external files), toast
+                                  notifications, session restore, remote
+                                  dir chooser, terminal spawn, status bar,
                                   session info popover
+  filebrowser.h  (~18 lines)    File browser context menu, inline edit, DnD API
+  filebrowser.c  (~470 lines)   Zed-style context menu (GtkPopover + buttons),
+                                  inline rename/new file/new folder entry,
+                                  recursive delete with confirmation dialog,
+                                  copy path/relative path, drag & drop
+                                  (move files within tree)
   theme.h        (~23 lines)     Theme definitions, declarations
   theme.c        (~154 lines)    Theme CSS generation, apply_theme,
                                   terminal colors, font intensity
@@ -63,7 +68,7 @@ src/
                                   poppler page numbers, async SSH connect
 ```
 
-Total: ~8060 lines of C (9 source files + 7 headers).
+Total: ~8530 lines of C (10 source files + 8 headers).
 
 ## Key Data Structures
 
@@ -324,22 +329,44 @@ Clicking the path label while connected opens a remote directory browser dialog.
 - File size limit: 10 MB (shows "(file too large)" for larger files)
 - Remote files are read-only (toast notification on save attempt)
 
-## File Browser Context Menu
+## File Browser Context Menu (filebrowser.c)
 
-Right-click on any file or directory to access:
+Zed-style context menu using a plain `GtkPopover` with `GtkButton` widgets (no GMenu/GAction — direct signal connections for reliable activation).
+
+Right-click on any file or directory:
+- **New File / New Folder** -- inserts a temporary row with inline `GtkEntry` at position 0. User types name, Enter creates, Escape removes the row.
+- **Rename** -- replaces the row's label with a `GtkEntry` pre-filled with the filename (extension excluded from selection, Zed-style). Enter confirms rename, Escape restores original label.
+- **Delete** -- confirmation dialog via `vibe_dialog_new()`, recursive delete via `delete_recursive()` (symlink-safe)
 - **Copy Path** -- copies absolute path to GDK clipboard
-- **Rename...** -- dialog with filename pre-filled, extension excluded from selection
-- **Delete...** -- confirmation dialog, recursive delete for directories via `delete_recursive()`
-- **New File** -- creates `untitled` (auto-numbered if exists) in the selected/current directory
-- **New Directory** -- creates `new_folder` (auto-numbered if exists)
+- **Copy Relative Path** -- copies path relative to `root_dir`
 
-All operations show toast notifications on success/failure. Remote files are blocked with toast message.
+### Lifecycle
+- `CtxMenuData` holds win, path, is_dir, popover pointer
+- Button callbacks copy needed data to stack locals, then call `popdown()` (which triggers `on_popover_closed` → idle unparent + free ctx)
+- No code accesses `ctx` after `popdown()` — prevents use-after-free
+
+### Inline Edit (shared for New File, New Folder, Rename)
+- `InlineEditCtx` holds row, original_label (ref'd), parent_dir, is_new flag
+- `finished` guard flag + signal disconnection on `entry`, `key_ctrl`, `focus_ctrl` prevents re-entrant calls from focus-out during `vibe_window_refresh_current_dir()`
+- ctx freed before refresh to prevent dangling pointer access
+
+### Drag & Drop (within tree)
+- `GtkDragSource` on `file_list` widget (not per-row — avoids eating clicks)
+- `GtkDropTarget` accepts `G_TYPE_STRING` (file path), uses `rename()` to move
+- Drop on directory = move into it; drop on file = move to same parent
+- Self-drop and overwrite protection
+
+All operations show toast notifications. Remote files blocked with toast.
 
 ## Drag & Drop
 
-`GtkDropTarget` on the main window accepts `GDK_TYPE_FILE_LIST`:
+**External (from file manager):** `GtkDropTarget` on the main window accepts `GDK_TYPE_FILE_LIST`:
 - Dropping a directory opens it as root (calls `vibe_window_set_root_directory`)
 - Dropping a file opens the file in the editor (sets root to parent dir if needed)
+
+**Internal (within file tree):** `GtkDragSource` + `GtkDropTarget` on `file_list` (see filebrowser.c):
+- Drag a file/directory to move it into another directory
+- Uses `rename()` for same-filesystem moves
 
 ## Toast Notifications
 

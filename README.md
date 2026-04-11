@@ -22,7 +22,7 @@ A lightweight file browser, terminal, and AI assistant built with GTK4, libadwai
 - **Async File Loading** -- Files load in background threads, UI never blocks
 - **Hidden/Ignored Files** -- Toggle dotfile visibility and gitignored file display (hide or show gray)
 - **Toast Notifications** -- Non-intrusive feedback for save, connect, rename, delete operations
-- **Drag & Drop** -- Drop files or folders from file manager to open them
+- **Drag & Drop** -- Drop files or folders from file manager to open them; drag files within the tree to move them
 
 ## Dependencies
 
@@ -113,13 +113,15 @@ All shortcuts are configurable via `settings.conf`.
 
 ## File Browser Context Menu
 
-Right-click on any file or directory:
+Right-click on any file or directory (Zed-style):
 
+- **New File** -- inline entry to type filename, Enter to create, Escape to cancel
+- **New Folder** -- inline entry to type folder name, Enter to create, Escape to cancel
+- **Rename** -- inline entry replacing the row label, filename selected without extension, Enter to confirm, Escape to cancel
+- **Delete** -- confirmation dialog, recursive delete for directories
 - **Copy Path** -- copy full path to clipboard
-- **Rename...** -- rename dialog with filename pre-selected (without extension)
-- **Delete...** -- confirmation dialog, recursive delete for directories
-- **New File** -- create untitled file in selected directory
-- **New Directory** -- create new_folder in selected directory
+- **Copy Relative Path** -- copy path relative to project root
+- **Drag & Drop** -- drag files within the tree to move them between directories
 
 ## Git Status
 

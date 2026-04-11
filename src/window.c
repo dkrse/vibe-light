@@ -7,6 +7,7 @@
 #include "theme.h"
 #include "editor.h"
 #include "ai.h"
+#include "filebrowser.h"
 #include <webkit/webkit.h>
 #include <string.h>
 #include <strings.h>
@@ -545,6 +546,9 @@ static void git_status_thread(GTask *task, gpointer src, gpointer data,
 /* Apply git status colors to existing rows in the file list */
 static void apply_git_status_to_rows(VibeWindow *win);
 
+static void refresh_git_status(VibeWindow *win);
+static gboolean git_poll_cb(gpointer data);
+
 static void git_status_done(GObject *src, GAsyncResult *res, gpointer data) {
     (void)src;
     GitStatusCtx *ctx = data;
@@ -573,6 +577,18 @@ static void git_status_done(GObject *src, GAsyncResult *res, gpointer data) {
     g_free(ctx->git_root);
     g_free(ctx->status_output);
     g_free(ctx);
+
+    /* Schedule next git status poll in 3 seconds */
+    if (win->git_poll_id)
+        g_source_remove(win->git_poll_id);
+    win->git_poll_id = g_timeout_add(3000, git_poll_cb, win);
+}
+
+static gboolean git_poll_cb(gpointer data) {
+    VibeWindow *win = data;
+    win->git_poll_id = 0;
+    refresh_git_status(win);
+    return G_SOURCE_REMOVE;
 }
 
 static void refresh_git_status(VibeWindow *win) {
@@ -643,7 +659,14 @@ static void apply_git_status_to_rows(VibeWindow *win) {
         const char *current_text = gtk_label_get_text(GTK_LABEL(lbl));
         if (!current_text) continue;
 
-        if (color) {
+        if (status == 'I') {
+            char *escaped = g_markup_escape_text(current_text, -1);
+            char markup[1024];
+            snprintf(markup, sizeof(markup),
+                     "<span style=\"italic\" alpha=\"50%%\">%s</span>", escaped);
+            gtk_label_set_markup(GTK_LABEL(lbl), markup);
+            g_free(escaped);
+        } else if (color) {
             char *escaped = g_markup_escape_text(current_text, -1);
             char markup[1024];
             snprintf(markup, sizeof(markup),
@@ -721,8 +744,9 @@ static int insert_children(VibeWindow *win, const char *dir_path, int depth,
     int count = 0, capacity = 0;
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
-        /* Always skip . and .. */
+        /* Always skip . and .. and .git */
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        if (strcmp(ent->d_name, ".git") == 0) continue;
         /* Skip dotfiles unless show_hidden is enabled */
         if (ent->d_name[0] == '.' && !win->settings.show_hidden) continue;
         if (count >= capacity) {
@@ -838,6 +862,7 @@ static GPtrArray *win_ssh_argv(VibeWindow *win) {
                         win->ssh_key, win->ssh_ctl_path);
 }
 
+
 /* ── SSH ControlMaster lifecycle ── */
 
 /* Wrappers for ssh_ctl_start/stop using window state */
@@ -886,7 +911,8 @@ static void ssh_ls_populate(VibeWindow *win, const char *local_dir_path,
             char *name = lines[i];
             int len = (int)strlen(name);
             if (!len) continue;
-            /* Skip hidden files unless show_hidden */
+            /* Always skip .git; skip other dotfiles unless show_hidden */
+            if (strcmp(name, ".git") == 0 || strcmp(name, ".git/") == 0) continue;
             if (name[0] == '.' && !win->settings.show_hidden) continue;
             gboolean is_dir = (name[len - 1] == '/');
             if ((pass == 0 && !is_dir) || (pass == 1 && is_dir)) continue;
@@ -944,6 +970,10 @@ static void stop_file_monitor(VibeWindow *win) {
 }
 
 static void stop_dir_monitor(VibeWindow *win) {
+    if (win->git_poll_id) {
+        g_source_remove(win->git_poll_id);
+        win->git_poll_id = 0;
+    }
     if (win->fs_refresh_id) {
         g_source_remove(win->fs_refresh_id);
         win->fs_refresh_id = 0;
@@ -1147,6 +1177,7 @@ static void remote_refresh_done(GObject *src, GAsyncResult *res, gpointer data) 
                 char *name = lines[i];
                 int len = (int)strlen(name);
                 if (!len) continue;
+                if (strcmp(name, ".git") == 0 || strcmp(name, ".git/") == 0) continue;
                 if (name[0] == '.' && !win->settings.show_hidden) continue;
                 gboolean is_dir = (name[len - 1] == '/');
                 if ((pass == 0 && !is_dir) || (pass == 1 && is_dir)) continue;
@@ -1767,309 +1798,12 @@ GtkWidget *vibe_dialog_new(VibeWindow *win, const char *title, int width, int he
     return dialog;
 }
 
-/* ── File browser context menu ── */
+/* ── File browser context menu (in filebrowser.c) ── */
 
-typedef struct {
-    VibeWindow *win;
-    char        path[4096];
-    gboolean    is_dir;
-} FileMenuCtx;
-
-static void refresh_current_dir(VibeWindow *win) {
+void vibe_window_refresh_current_dir(VibeWindow *win) {
     if (!win->current_dir[0]) return;
     if (win->fs_refresh_id) g_source_remove(win->fs_refresh_id);
     win->fs_refresh_id = g_timeout_add(50, fs_refresh_cb, win);
-}
-
-static void on_ctx_new_file(GSimpleAction *act, GVariant *param, gpointer data) {
-    (void)act; (void)param;
-    FileMenuCtx *ctx = data;
-    VibeWindow *win = ctx->win;
-
-    /* Determine parent directory */
-    const char *dir = ctx->is_dir ? ctx->path : win->current_dir;
-
-    char path[4128];
-    snprintf(path, sizeof(path), "%s/untitled", dir);
-
-    /* Find unique name */
-    int n = 1;
-    while (g_file_test(path, G_FILE_TEST_EXISTS)) {
-        snprintf(path, sizeof(path), "%s/untitled_%d", dir, n++);
-    }
-
-    FILE *f = fopen(path, "w");
-    if (f) {
-        fclose(f);
-        const char *base = strrchr(path, '/');
-        char *msg = g_strdup_printf("Created %s", base ? base + 1 : path);
-        vibe_toast(win, msg);
-        g_free(msg);
-        refresh_current_dir(win);
-    } else {
-        vibe_toast(win, "Failed to create file");
-    }
-    g_free(ctx);
-}
-
-static void on_ctx_new_dir(GSimpleAction *act, GVariant *param, gpointer data) {
-    (void)act; (void)param;
-    FileMenuCtx *ctx = data;
-    VibeWindow *win = ctx->win;
-
-    const char *dir = ctx->is_dir ? ctx->path : win->current_dir;
-
-    char path[4128];
-    snprintf(path, sizeof(path), "%s/new_folder", dir);
-
-    int n = 1;
-    while (g_file_test(path, G_FILE_TEST_EXISTS)) {
-        snprintf(path, sizeof(path), "%s/new_folder_%d", dir, n++);
-    }
-
-    if (g_mkdir_with_parents(path, 0755) == 0) {
-        const char *base = strrchr(path, '/');
-        char *msg = g_strdup_printf("Created %s/", base ? base + 1 : path);
-        vibe_toast(win, msg);
-        g_free(msg);
-        refresh_current_dir(win);
-    } else {
-        vibe_toast(win, "Failed to create directory");
-    }
-    g_free(ctx);
-}
-
-typedef struct { FileMenuCtx *fctx; GtkEntry *entry; GtkWindow *dialog; } RenameCtx;
-
-static void on_rename_go(GtkButton *btn, gpointer data) {
-    (void)btn;
-    RenameCtx *rctx = data;
-    FileMenuCtx *ctx = rctx->fctx;
-    VibeWindow *win = ctx->win;
-
-    const char *new_name = gtk_editable_get_text(GTK_EDITABLE(rctx->entry));
-    if (new_name[0] && !strchr(new_name, '/')) {
-        char *parent = g_path_get_dirname(ctx->path);
-        char new_path[4096];
-        snprintf(new_path, sizeof(new_path), "%s/%s", parent, new_name);
-        if (rename(ctx->path, new_path) == 0) {
-            char msg[300];
-            snprintf(msg, sizeof(msg), "Renamed to %s", new_name);
-            vibe_toast(win, msg);
-            refresh_current_dir(win);
-        } else {
-            vibe_toast(win, "Rename failed");
-        }
-        g_free(parent);
-    }
-    gtk_window_destroy(rctx->dialog);
-}
-
-static void on_rename_destroy(GtkWidget *w, gpointer data) {
-    (void)w;
-    RenameCtx *rctx = data;
-    g_free(rctx->fctx);
-    g_free(rctx);
-}
-
-static void on_ctx_rename(GSimpleAction *act, GVariant *param, gpointer data) {
-    (void)act; (void)param;
-    FileMenuCtx *ctx = data;
-    VibeWindow *win = ctx->win;
-
-    if (path_is_remote(ctx->path)) { vibe_toast(win, "Cannot rename remote files"); g_free(ctx); return; }
-
-    const char *base = strrchr(ctx->path, '/');
-    base = base ? base + 1 : ctx->path;
-
-    GtkWidget *dialog = vibe_dialog_new(win, "Rename", 300, -1);
-
-    RenameCtx *rctx = g_new(RenameCtx, 1);
-    rctx->fctx = ctx;
-    rctx->dialog = GTK_WINDOW(dialog);
-    g_signal_connect(dialog, "destroy", G_CALLBACK(on_rename_destroy), rctx);
-
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-    gtk_widget_set_margin_start(vbox, 12);
-    gtk_widget_set_margin_end(vbox, 12);
-    gtk_widget_set_margin_top(vbox, 12);
-    gtk_widget_set_margin_bottom(vbox, 12);
-
-    GtkWidget *entry = gtk_entry_new();
-    rctx->entry = GTK_ENTRY(entry);
-    gtk_editable_set_text(GTK_EDITABLE(entry), base);
-    gtk_box_append(GTK_BOX(vbox), entry);
-
-    GtkWidget *rename_btn = gtk_button_new_with_label("Rename");
-    gtk_widget_add_css_class(rename_btn, "suggested-action");
-    gtk_widget_set_halign(rename_btn, GTK_ALIGN_END);
-    g_signal_connect(rename_btn, "clicked", G_CALLBACK(on_rename_go), rctx);
-    gtk_box_append(GTK_BOX(vbox), rename_btn);
-
-    gtk_window_set_child(GTK_WINDOW(dialog), vbox);
-    gtk_window_present(GTK_WINDOW(dialog));
-    gtk_widget_grab_focus(entry);
-
-    const char *dot = strrchr(base, '.');
-    int sel_len = dot && dot != base ? (int)(dot - base) : (int)strlen(base);
-    gtk_editable_select_region(GTK_EDITABLE(entry), 0, sel_len);
-}
-
-/* Recursive delete helper */
-static gboolean delete_recursive(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) != 0) return FALSE;
-
-    /* Don't follow symlinks — just remove the link itself */
-    if (S_ISLNK(st.st_mode))
-        return unlink(path) == 0;
-
-    if (S_ISDIR(st.st_mode)) {
-        DIR *d = opendir(path);
-        if (!d) return FALSE;
-        struct dirent *ent;
-        while ((ent = readdir(d)) != NULL) {
-            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-            char child[4096];
-            snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
-            delete_recursive(child);
-        }
-        closedir(d);
-        return rmdir(path) == 0;
-    } else {
-        return unlink(path) == 0;
-    }
-}
-
-typedef struct { FileMenuCtx *fctx; GtkWindow *dialog; } DeleteCtx;
-
-static void on_delete_confirm(GtkButton *btn, gpointer data) {
-    (void)btn;
-    DeleteCtx *dctx = data;
-    FileMenuCtx *ctx = dctx->fctx;
-    VibeWindow *win = ctx->win;
-
-    const char *base = strrchr(ctx->path, '/');
-    base = base ? base + 1 : ctx->path;
-    if (delete_recursive(ctx->path)) {
-        char *msg = g_strdup_printf("Deleted %s", base);
-        vibe_toast(win, msg);
-        g_free(msg);
-        refresh_current_dir(win);
-    } else {
-        vibe_toast(win, "Delete failed");
-    }
-    gtk_window_destroy(dctx->dialog);
-}
-
-static void on_delete_destroy(GtkWidget *w, gpointer data) {
-    (void)w;
-    DeleteCtx *dctx = data;
-    g_free(dctx->fctx);
-    g_free(dctx);
-}
-
-static void on_ctx_delete(GSimpleAction *act, GVariant *param, gpointer data) {
-    (void)act; (void)param;
-    FileMenuCtx *ctx = data;
-    VibeWindow *win = ctx->win;
-
-    if (path_is_remote(ctx->path)) { vibe_toast(win, "Cannot delete remote files"); g_free(ctx); return; }
-
-    const char *base = strrchr(ctx->path, '/');
-    base = base ? base + 1 : ctx->path;
-
-    char *title = g_strdup_printf("Delete \"%s\"?", base);
-
-    GtkWidget *dialog = vibe_dialog_new(win, title, 350, -1);
-    g_free(title);
-
-    DeleteCtx *dctx = g_new(DeleteCtx, 1);
-    dctx->fctx = ctx;
-    dctx->dialog = GTK_WINDOW(dialog);
-    g_signal_connect(dialog, "destroy", G_CALLBACK(on_delete_destroy), dctx);
-
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_start(vbox, 12);
-    gtk_widget_set_margin_end(vbox, 12);
-    gtk_widget_set_margin_top(vbox, 12);
-    gtk_widget_set_margin_bottom(vbox, 12);
-
-    GtkWidget *label = gtk_label_new(ctx->is_dir ? "This directory and all contents will be permanently deleted."
-                                                  : "This file will be permanently deleted.");
-    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
-    gtk_box_append(GTK_BOX(vbox), label);
-
-    GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_set_halign(btn_box, GTK_ALIGN_END);
-
-    GtkWidget *cancel_btn = gtk_button_new_with_label("Cancel");
-    g_signal_connect_swapped(cancel_btn, "clicked", G_CALLBACK(gtk_window_destroy), dialog);
-    gtk_box_append(GTK_BOX(btn_box), cancel_btn);
-
-    GtkWidget *del_btn = gtk_button_new_with_label("Delete");
-    gtk_widget_add_css_class(del_btn, "destructive-action");
-    g_signal_connect(del_btn, "clicked", G_CALLBACK(on_delete_confirm), dctx);
-    gtk_box_append(GTK_BOX(btn_box), del_btn);
-
-    gtk_box_append(GTK_BOX(vbox), btn_box);
-    gtk_window_set_child(GTK_WINDOW(dialog), vbox);
-    gtk_window_present(GTK_WINDOW(dialog));
-}
-
-static void on_ctx_copy_path(GSimpleAction *act, GVariant *param, gpointer data) {
-    (void)act; (void)param;
-    FileMenuCtx *ctx = data;
-    GdkClipboard *clip = gdk_display_get_clipboard(gdk_display_get_default());
-    gdk_clipboard_set_text(clip, ctx->path);
-    vibe_toast(ctx->win, "Path copied");
-    g_free(ctx);
-}
-
-static void show_file_context_menu(VibeWindow *win, GtkWidget *widget,
-                                    const char *path, gboolean is_dir,
-                                    double x, double y) {
-    GMenu *menu = g_menu_new();
-    g_menu_append(menu, "Copy Path", "ctx.copy-path");
-    g_menu_append(menu, "Rename…", "ctx.rename");
-    g_menu_append(menu, "Delete…", "ctx.delete");
-
-    GMenu *new_section = g_menu_new();
-    g_menu_append(new_section, "New File", "ctx.new-file");
-    g_menu_append(new_section, "New Directory", "ctx.new-dir");
-    g_menu_append_section(menu, NULL, G_MENU_MODEL(new_section));
-    g_object_unref(new_section);
-
-    /* Each action gets its own context with the path */
-    GSimpleActionGroup *group = g_simple_action_group_new();
-
-    #define CTX_ACTION(name, cb) do { \
-        FileMenuCtx *c = g_new(FileMenuCtx, 1); \
-        c->win = win; c->is_dir = is_dir; \
-        g_strlcpy(c->path, path, sizeof(c->path)); \
-        GSimpleAction *a = g_simple_action_new(name, NULL); \
-        g_signal_connect(a, "activate", G_CALLBACK(cb), c); \
-        g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(a)); \
-        g_object_unref(a); \
-    } while(0)
-
-    CTX_ACTION("copy-path", on_ctx_copy_path);
-    CTX_ACTION("rename", on_ctx_rename);
-    CTX_ACTION("delete", on_ctx_delete);
-    CTX_ACTION("new-file", on_ctx_new_file);
-    CTX_ACTION("new-dir", on_ctx_new_dir);
-    #undef CTX_ACTION
-
-    gtk_widget_insert_action_group(widget, "ctx", G_ACTION_GROUP(group));
-
-    GtkWidget *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
-    gtk_widget_set_parent(popover, widget);
-
-    GdkRectangle rect = { (int)x, (int)y, 1, 1 };
-    gtk_popover_set_pointing_to(GTK_POPOVER(popover), &rect);
-    gtk_popover_popup(GTK_POPOVER(popover));
-
-    g_object_unref(menu);
 }
 
 static void on_file_list_right_click(GtkGestureClick *gesture, int n_press,
@@ -2078,7 +1812,6 @@ static void on_file_list_right_click(GtkGestureClick *gesture, int n_press,
     VibeWindow *win = data;
     gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
 
-    /* Find which row was clicked */
     GtkListBoxRow *row = gtk_list_box_get_row_at_y(win->file_list, (int)y);
     if (!row) return;
 
@@ -2089,7 +1822,7 @@ static void on_file_list_right_click(GtkGestureClick *gesture, int n_press,
     if (!full_path) return;
     gboolean is_dir = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(lbl), "is-dir"));
 
-    show_file_context_menu(win, GTK_WIDGET(win->file_list), full_path, is_dir, x, y);
+    filebrowser_show_context_menu(win, GTK_WIDGET(win->file_list), full_path, is_dir, x, y);
 }
 
 static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data) {
@@ -2150,6 +1883,7 @@ static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer 
             gtk_list_box_insert(win->file_list, more_lbl, row_idx + show);
         }
         update_file_status(win);
+        apply_git_status_to_rows(win);
         return;
     }
 
@@ -2179,7 +1913,17 @@ static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer 
             build_indent(indent, sizeof(indent), depth);
             char buf[512];
             snprintf(buf, sizeof(buf), "%s%s %s", indent, has_kids ? "▶" : " ", name);
-            gtk_label_set_text(GTK_LABEL(label), buf);
+            int st = git_status_for_dir(win, full_path);
+            const char *clr = git_status_color(st);
+            if (clr) {
+                char *esc = g_markup_escape_text(buf, -1);
+                char mkup[1024];
+                snprintf(mkup, sizeof(mkup), "<span foreground=\"%s\">%s</span>", clr, esc);
+                gtk_label_set_markup(GTK_LABEL(label), mkup);
+                g_free(esc);
+            } else {
+                gtk_label_set_text(GTK_LABEL(label), buf);
+            }
         } else {
             /* expand: insert children after this row */
             if (path_is_remote(full_path) && win->ssh_host[0])
@@ -2195,9 +1939,20 @@ static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer 
             build_indent(indent, sizeof(indent), depth);
             char buf[512];
             snprintf(buf, sizeof(buf), "%s▼ %s", indent, name);
-            gtk_label_set_text(GTK_LABEL(label), buf);
+            int st = git_status_for_dir(win, full_path);
+            const char *clr = git_status_color(st);
+            if (clr) {
+                char *esc = g_markup_escape_text(buf, -1);
+                char mkup[1024];
+                snprintf(mkup, sizeof(mkup), "<span foreground=\"%s\">%s</span>", clr, esc);
+                gtk_label_set_markup(GTK_LABEL(label), mkup);
+                g_free(esc);
+            } else {
+                gtk_label_set_text(GTK_LABEL(label), buf);
+            }
         }
         update_file_status(win);
+        apply_git_status_to_rows(win);
     } else {
         open_and_watch_file(win, full_path);
         gtk_widget_grab_focus(GTK_WIDGET(win->file_view));
@@ -2920,6 +2675,7 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right_click), 3); /* button 3 = right */
     g_signal_connect(right_click, "pressed", G_CALLBACK(on_file_list_right_click), win);
     gtk_widget_add_controller(GTK_WIDGET(win->file_list), GTK_EVENT_CONTROLLER(right_click));
+    filebrowser_setup_dnd(win);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), GTK_WIDGET(win->file_list));
     gtk_box_append(GTK_BOX(browser_box), scroll);
 

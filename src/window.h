@@ -99,6 +99,7 @@ struct _VibeWindow {
     GHashTable           *git_status;       /* rel_path -> GINT status char */
     char                  git_root[4096];   /* absolute git root path */
     gboolean              git_status_in_flight;
+    guint                 git_poll_id;          /* periodic git status timer */
 
     /* Toast notifications */
     AdwToastOverlay      *toast_overlay;
@@ -113,6 +114,7 @@ void vibe_window_open_directory(VibeWindow *win, const char *path);
 void vibe_window_set_root_directory(VibeWindow *win, const char *path);
 void vibe_window_disconnect_sftp(VibeWindow *win);
 void vibe_window_toast(VibeWindow *win, const char *message);
+void vibe_window_refresh_current_dir(VibeWindow *win);
 void vibe_window_switch_ai_mode(VibeWindow *win);
 
 #endif

@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.10.0 (2026-04-11)
+
+### Features
+
+- **Zed-style file browser context menu** -- completely rewritten context menu using plain GtkPopover with button widgets (replaces broken GMenu/GAction approach that crashed on activation)
+- **Inline rename** -- Rename replaces the row label with an editable GtkEntry in-place (Zed-style). Filename selected without extension. Enter confirms, Escape cancels.
+- **Inline new file/folder** -- New File and New Folder insert a temporary row with an inline entry to type the name. Enter creates, Escape cancels. No more auto-generated "untitled" names.
+- **Copy Relative Path** -- new context menu action, copies path relative to project root
+- **Drag & drop file moving** -- drag files within the file tree to move them between directories. Drop on a directory moves into it; drop on a file moves to the same parent.
+
+### Architecture
+
+- **filebrowser.c / filebrowser.h** -- file browser context menu, inline editing, and internal DnD extracted from window.c into a dedicated module (~470 lines)
+- **vibe_window_refresh_current_dir()** -- new public API (was static `refresh_current_dir`)
+- Context menu uses direct `g_signal_connect("clicked")` on GtkButtons — no GMenu, GAction, or GSimpleActionGroup (eliminates action resolution timing issues)
+- Popover lifecycle: button callbacks copy data to stack locals, call `popdown()`, "closed" signal frees ctx via `g_idle_add(unparent)` — prevents use-after-free
+- Inline edit uses `finished` guard flag + signal disconnection on entry/key/focus controllers to prevent re-entrant calls from focus-out during refresh
+
+### Bug Fixes
+
+- **Context menu crash** -- old GMenu+GSimpleActionGroup approach had multiple issues: action group freed before popover resolved actions, popover not unparented on close, multiple FileMenuCtx allocations leaked. Replaced entirely.
+- **Inline edit crash on directory operations** -- `vibe_window_refresh_current_dir` destroyed entry widget, triggering focus-out callback on freed context. Fixed by disconnecting all signals before any widget destruction.
+
 ## v0.9.0 (2026-04-11)
 
 ### Features
@@ -42,7 +65,7 @@
   - Session expiry detection works in both streaming and batch modes (checks for "No conversation found" in result or empty EOF)
 - `VibeWindow` gains `ai_stream` (GDataInputStream), `ai_session_start`, `ai_session_turns` fields
 - `VibeSettings` gains `ai_streaming`, `ai_auto_accept`, `ai_session_start`, `ai_session_turns` fields
-- Total: ~8060 lines of C (9 source files + 7 headers)
+- Total: ~8530 lines of C (10 source files + 8 headers)
 
 ## v0.8.0 (2026-04-10)
 
