@@ -119,7 +119,7 @@ Configuration struct with per-section fonts and global controls:
 - **Editor:** font, size, font_intensity, weight, line_numbers, highlight_line, wrap_lines
 - **Terminal:** font, size, font_intensity
 - **Prompt:** font, size, send_enter, switch_terminal
-- **AI Model:** font_size, font_intensity, full_disk_access, per-tool toggles, ai_markdown, ai_streaming, ai_auto_accept, ai_last_session, ai_session_start, ai_session_turns
+- **AI Model:** font_size, font_intensity, full_disk_access, per-tool toggles, ai_markdown, ai_streaming, ai_auto_accept, ai_last_session, ai_session_start, ai_session_turns, ai_sessions_dir
 - **PDF:** margins (left/right/top/bottom mm), landscape, page_numbers (0=none, 1=n, 2=n/total)
 - **Window:** window_width, window_height, last_directory
 - **Session:** last_file, last_cursor_line, last_cursor_col, last_tab
@@ -381,13 +381,13 @@ All operations show toast notifications. Remote files blocked with toast.
 
 ## AI Assistant
 
-- Spawns `claude -p "prompt" --output-format stream-json` (streaming) or `--output-format json` (batch) via GSubprocess
-- **Streaming mode** reads stdout line-by-line via `GDataInputStream`, processes `text_delta` events (JS DOM append via `insertAdjacentText` for performance) and `result` events (extract metadata + full cmark re-render).
-- **Batch mode** reads all stdout when process exits (legacy behavior)
+- Spawns `claude -p --output-format stream-json` (streaming) or `--output-format json` (batch) via GSubprocess. Prompt text sent via stdin pipe (`G_SUBPROCESS_FLAGS_STDIN_PIPE`) instead of CLI argument to avoid argument parsing issues with multi-line or special-character prompts.
+- **Streaming mode** reads stdout line-by-line via `GDataInputStream`, accumulates `text_delta` events into `ai_conversation_md`. Markdown render (`ai_refresh_output`) happens once on stream finalize — no incremental JS DOM updates.
+- **Batch mode** reads all stdout when process exits, prompt sent via `g_subprocess_communicate_async` input bytes
 - Session continuity via `--resume SESSION_ID`
 - Token tracking: input/output/total with dynamic formatting (k/M suffixes)
 - Elapsed time display (seconds or minutes)
-- Model name extracted from response JSON
+- Model name extracted from response JSON; falls back to "ready" if not found
 - Configurable tool access: Read, Edit, Write, Glob, Grep, Bash
 - **Tool-use confirmation dialogs** (streaming mode) -- `tool_use` events in stream-json intercepted, modal dialog shown with tool name and key parameters. Auto-accept ON + tool enabled = skip dialog; auto-accept ON + tool disabled = dialog; auto_accept OFF = always dialog. Deny kills the subprocess. In streaming mode all 6 tools are always passed via `--allowed-tools` to prevent CLI stdin blocking; GUI handles the approval flow.
 - Markdown toggle: switch between HTML rendering and raw text output (`ai_markdown` setting)
@@ -397,8 +397,9 @@ All operations show toast notifications. Remote files blocked with toast.
 - Full support for tables, code blocks, headings, bold, italic, links, blockquotes, lists, strikethrough, horizontal rules
 - **LaTeX \text{} support** -- `\text{}`, `\mathrm{}`, `\textbf{}`, `\mathbf{}` render as plain text; `\frac{a}{b}` renders as `(a)/(b)` with recursive processing
 - **Session persistence** -- session ID, start time, and turn count saved to settings.conf, restored on startup, auto-cleared when expired
-- **Session info popover** -- clicking session label in status bar shows session ID, started date/time, duration, turns, tokens, and mode
-- **Error handling** -- stderr captured, exit codes checked, empty/malformed responses reported in conversation
+- **Session browser** -- "Open Session…" in status bar popover opens a full dialog listing all JSONL sessions from `~/.claude/projects/<dir>/` with summary, date, model, turns, and token usage. Clicking a session reconstructs the conversation and restores token/turn counts. Sessions directory configurable via `ai_sessions_dir` setting with Browse… button in AI Model dialog.
+- **Session info popover** -- clicking session label in status bar shows New Session / Open Session… buttons. With active session: session ID, started date/time, duration, turns, tokens, and mode
+- **Error handling** -- EOF with empty response reads stderr for error message. Exit codes checked, empty/malformed responses reported in conversation with captured stderr text. Status bar shows "error" or "ready" instead of stuck "thinking…".
 - **Conversation logging** via `prompt_log.c` -- both input and output entries logged to `.LLM/prompts.json` with model, session, token counts, elapsed time. Input deferred until response arrives so model/session are accurate. Writes are atomic (temp file + `rename()`).
 
 ## Terminal

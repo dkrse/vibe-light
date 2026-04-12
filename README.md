@@ -160,16 +160,19 @@ SSH connections use ControlMaster multiplexing for efficient reuse of a single T
 Built-in integration with Claude CLI (`claude` command):
 
 - Send prompts and view responses in a dedicated tab
-- **Interactive streaming** -- responses stream in real-time via JS DOM append (configurable: streaming or batch mode), full markdown re-render on completion
+- **Streaming output** -- responses stream via `stream-json` format (configurable: streaming or batch mode), markdown rendered on completion
 - **Full HTML markdown rendering** -- WebKitWebView with cmark-gfm (HTML sanitized): tables, code blocks, headings, bold, italic, links, blockquotes, lists, horizontal rules
 - **LaTeX to Unicode** -- math expressions like `$E = mc^2$` rendered as `E = mc²`, `$\sum$` as `∑`
 - **Theme-aware** -- AI output follows app theme (dark/light CSS)
 - Session continuity via `--resume` with automatic session persistence across restarts
+- **Session browser** -- open any previous session from a full list with summary, date, model, turns, and token usage. Conversation text reconstructed from JSONL files.
+- **Session picker** -- click "sessions ▾" in status bar for New Session / Open Session… actions
 - **Session auto-recovery** -- if a saved session expires, automatically retries with a new session
-- **Session info popover** -- click session in status bar to see session ID, started time, duration, turns, tokens, mode
-- Token usage tracking (input/output/total)
+- **Configurable sessions directory** -- set custom sessions path in AI Model dialog with Browse… button
+- Token usage tracking (input/output/total), restored from JSONL on session load
 - Configurable tool access (Read, Edit, Write, Glob, Grep, Bash) with auto-accept toggle and GUI confirmation dialogs for unapproved tools
 - **Markdown toggle** -- switch between HTML markdown rendering and raw text output
+- **Multi-line prompts** -- prompt text sent via stdin pipe, supports any content including code blocks and special characters
 - Optional CWD restriction for security
 - **Conversation memory cap** -- conversation buffer capped at 256KB, oldest half trimmed automatically
 - **Conversation logging** to `.LLM/prompts.json` with model, session, tokens, timestamps (atomic writes via temp+rename)
@@ -194,7 +197,7 @@ Prompts and responses are logged to `{project}/.LLM/prompts.json`:
 | Editor | Font, Font Intensity, Font Weight, Line Spacing, Line Numbers, Highlight Line, Wrap Lines |
 | Terminal | Font, Font Intensity |
 | Prompt | Font, Send with (Ctrl+Enter/Enter), Show Terminal after send |
-| AI Model | Font, Font Intensity, Full Disk Access, Tool toggles, Markdown rendering, Streaming, Auto-accept, Session resume |
+| AI Model | Font, Font Intensity, Full Disk Access, Tool toggles, Markdown rendering, Streaming, Auto-accept, Session resume, Sessions directory (with Browse…) |
 | PDF | Left/Right/Top/Bottom margins (mm), Landscape, Page numbers (None/n/n÷total) |
 
 ## Configuration

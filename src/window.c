@@ -2145,10 +2145,10 @@ static void update_status_bar_page(VibeWindow *win, int page) {
 
         if (win->ai_session_id[0]) {
             char sid[160];
-            snprintf(sid, sizeof(sid), "session: %s", win->ai_session_id);
+            snprintf(sid, sizeof(sid), "session: %.8s… ▾", win->ai_session_id);
             gtk_label_set_text(win->cursor_label, sid);
         } else {
-            gtk_label_set_text(win->cursor_label, "no session");
+            gtk_label_set_text(win->cursor_label, "sessions ▾");
         }
     } else {
         gtk_label_set_text(win->status_label, "");
@@ -2174,6 +2174,364 @@ void update_status_bar(VibeWindow *win) {
     update_status_bar_page(win, gtk_notebook_get_current_page(win->notebook));
 }
 
+/* ── Session picker helpers ── */
+
+/* Get the sessions directory path. Uses custom setting or derives from CWD. */
+static void get_sessions_dir(VibeWindow *win, char *buf, size_t bufsize) {
+    buf[0] = '\0';
+    if (win->settings.ai_sessions_dir[0]) {
+        g_strlcpy(buf, win->settings.ai_sessions_dir, bufsize);
+        return;
+    }
+    const char *cwd = win->ai_cwd[0] ? win->ai_cwd : win->root_dir;
+    if (!cwd[0]) return;
+    char safe[2048];
+    g_strlcpy(safe, cwd, sizeof(safe));
+    for (char *p = safe; *p; p++)
+        if (*p == '/') *p = '-';
+    snprintf(buf, bufsize, "%s/.claude/projects/%s", g_get_home_dir(), safe);
+}
+
+/* ── Session types ── */
+
+typedef struct {
+    char sid[128];
+    char summary[200];
+    gint64 mtime;
+    int turns;
+    int input_tokens;
+    int output_tokens;
+    char model[64];
+} SessionEntry;
+
+static int session_cmp(const void *a, const void *b) {
+    const SessionEntry *sa = a, *sb = b;
+    if (sb->mtime > sa->mtime) return 1;
+    if (sb->mtime < sa->mtime) return -1;
+    return 0;
+}
+
+/* ── Session browser dialog ── */
+
+static void on_session_browser_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data) {
+    (void)box;
+    VibeWindow *win = data;
+    GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(row));
+    if (!child) return;
+    const char *sid = g_object_get_data(G_OBJECT(child), "session-id");
+    if (!sid) return;
+
+    /* Close the dialog */
+    GtkWidget *dialog = gtk_widget_get_ancestor(GTK_WIDGET(box), GTK_TYPE_WINDOW);
+    if (dialog && dialog != GTK_WIDGET(win->window))
+        gtk_window_destroy(GTK_WINDOW(dialog));
+
+    /* Switch to this session (reuse on_session_row_clicked logic) */
+    g_strlcpy(win->ai_session_id, sid, sizeof(win->ai_session_id));
+    g_strlcpy(win->settings.ai_last_session, sid, sizeof(win->settings.ai_last_session));
+    win->ai_session_turns = 0;
+    win->ai_input_tokens = 0;
+    win->ai_output_tokens = 0;
+    win->ai_session_start = g_get_real_time();
+    win->settings.ai_session_start = win->ai_session_start;
+    settings_save(&win->settings);
+
+    /* Reconstruct conversation from JSONL */
+    if (win->ai_conversation_md)
+        g_string_truncate(win->ai_conversation_md, 0);
+    else
+        win->ai_conversation_md = g_string_new(NULL);
+
+    char sessions_dir[4096];
+    get_sessions_dir(win, sessions_dir, sizeof(sessions_dir));
+    char proj_path[4608] = "";
+    if (sessions_dir[0])
+        snprintf(proj_path, sizeof(proj_path), "%s/%s.jsonl", sessions_dir, sid);
+
+    if (proj_path[0] && g_file_test(proj_path, G_FILE_TEST_EXISTS)) {
+        FILE *f = fopen(proj_path, "r");
+        if (f) {
+            char line[65536];
+            while (fgets(line, sizeof(line), f)) {
+                /* User messages → conversation + turn count */
+                if (strstr(line, "\"role\":\"user\"") && strstr(line, "\"type\":\"user\"")) {
+                    win->ai_session_turns++;
+                    const char *tp = strstr(line, "\"text\":\"");
+                    if (tp) {
+                        tp += 8;
+                        GString *text = g_string_new(NULL);
+                        while (*tp && !(*tp == '"' && *(tp-1) != '\\')) {
+                            if (tp[0] == '\\' && tp[1] == 'n') { g_string_append_c(text, '\n'); tp += 2; }
+                            else if (tp[0] == '\\' && tp[1] == '"') { g_string_append_c(text, '"'); tp += 2; }
+                            else if (tp[0] == '\\' && tp[1] == '\\') { g_string_append_c(text, '\\'); tp += 2; }
+                            else { g_string_append_c(text, *tp); tp++; }
+                        }
+                        if (text->len > 0)
+                            g_string_append_printf(win->ai_conversation_md,
+                                "*>>> %s*\n\n---\n\n", text->str);
+                        g_string_free(text, TRUE);
+                    }
+                }
+                /* Assistant messages → conversation text + token usage */
+                if (strstr(line, "\"role\":\"assistant\"")) {
+                    if (strstr(line, "\"type\":\"text\"")) {
+                        const char *tp = strstr(line, "\"text\":\"");
+                        if (tp) {
+                            tp += 8;
+                            GString *text = g_string_new(NULL);
+                            while (*tp && !(*tp == '"' && *(tp-1) != '\\')) {
+                                if (tp[0] == '\\' && tp[1] == 'n') { g_string_append_c(text, '\n'); tp += 2; }
+                                else if (tp[0] == '\\' && tp[1] == '"') { g_string_append_c(text, '"'); tp += 2; }
+                                else if (tp[0] == '\\' && tp[1] == '\\') { g_string_append_c(text, '\\'); tp += 2; }
+                                else { g_string_append_c(text, *tp); tp++; }
+                            }
+                            if (text->len > 0)
+                                g_string_append_printf(win->ai_conversation_md, "%s\n\n", text->str);
+                            g_string_free(text, TRUE);
+                        }
+                    }
+                    if (strstr(line, "\"usage\"")) {
+                        const char *it = strstr(line, "\"input_tokens\":");
+                        if (it) win->ai_input_tokens += atoi(it + 15);
+                        const char *ot = strstr(line, "\"output_tokens\":");
+                        if (ot) win->ai_output_tokens += atoi(ot + 16);
+                        const char *cr = strstr(line, "\"cache_read_input_tokens\":");
+                        if (cr) win->ai_input_tokens += atoi(cr + 25);
+                        const char *cc = strstr(line, "\"cache_creation_input_tokens\":");
+                        if (cc) win->ai_input_tokens += atoi(cc + 29);
+                        /* Model name */
+                        const char *mp = strstr(line, "\"model\":\"");
+                        if (mp) {
+                            mp += 9;
+                            char model[128];
+                            int mi = 0;
+                            while (*mp && *mp != '"' && mi < 127)
+                                model[mi++] = *mp++;
+                            model[mi] = '\0';
+                            gtk_label_set_text(win->ai_status_label, model);
+                        }
+                    }
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    ai_refresh_output(win);
+    update_status_bar(win);
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Resumed session %.8s…", sid);
+    vibe_window_toast(win, msg);
+}
+
+static void on_open_sessions_clicked(GtkButton *btn, gpointer data) {
+    (void)data;
+    VibeWindow *win = g_object_get_data(G_OBJECT(btn), "win");
+    GtkWidget *popover = g_object_get_data(G_OBJECT(btn), "popover");
+    gtk_popover_popdown(GTK_POPOVER(popover));
+
+    char proj_dir[4096];
+    get_sessions_dir(win, proj_dir, sizeof(proj_dir));
+    if (!proj_dir[0]) { vibe_window_toast(win, "No working directory set"); return; }
+
+    GDir *dir = g_dir_open(proj_dir, 0, NULL);
+    if (!dir) { vibe_window_toast(win, "No sessions found"); return; }
+
+    /* Collect all sessions */
+    SessionEntry entries[1000];
+    int count = 0;
+    const char *name;
+    while ((name = g_dir_read_name(dir)) && count < 1000) {
+        size_t nlen = strlen(name);
+        if (nlen < 42 || strcmp(name + nlen - 6, ".jsonl") != 0) continue;
+
+        char sid[128];
+        g_strlcpy(sid, name, sizeof(sid));
+        sid[nlen - 6] = '\0';
+
+        char fullpath[4608];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", proj_dir, name);
+
+        GFile *gf = g_file_new_for_path(fullpath);
+        GFileInfo *fi = g_file_query_info(gf, G_FILE_ATTRIBUTE_TIME_MODIFIED,
+                                           G_FILE_QUERY_INFO_NONE, NULL, NULL);
+        g_object_unref(gf);
+        if (!fi) continue;
+        gint64 mtime = g_file_info_get_attribute_uint64(fi, G_FILE_ATTRIBUTE_TIME_MODIFIED);
+        g_object_unref(fi);
+
+        SessionEntry *e = &entries[count];
+        g_strlcpy(e->sid, sid, sizeof(e->sid));
+        e->mtime = mtime;
+        e->summary[0] = '\0';
+        e->turns = 0;
+        e->input_tokens = 0;
+        e->output_tokens = 0;
+        e->model[0] = '\0';
+
+        FILE *f = fopen(fullpath, "r");
+        if (f) {
+            char line[65536];
+            gboolean got_summary = FALSE;
+            while (fgets(line, sizeof(line), f)) {
+                /* First user message → summary */
+                if (!got_summary && strstr(line, "\"role\":\"user\"")) {
+                    const char *tp = strstr(line, "\"text\":\"");
+                    if (tp) {
+                        tp += 8;
+                        int i = 0;
+                        while (*tp && *tp != '"' && i < 120) {
+                            if (tp[0] == '\\' && tp[1] == 'n') { e->summary[i++] = ' '; tp += 2; }
+                            else if (tp[0] == '\\' && tp[1]) { e->summary[i++] = tp[1]; tp += 2; }
+                            else { e->summary[i++] = *tp; tp++; }
+                        }
+                        e->summary[i] = '\0';
+                        got_summary = TRUE;
+                    }
+                }
+                /* Count user turns */
+                if (strstr(line, "\"type\":\"user\""))
+                    e->turns++;
+                /* Assistant messages → tokens + model */
+                if (strstr(line, "\"role\":\"assistant\"") && strstr(line, "\"usage\"")) {
+                    /* Model */
+                    if (!e->model[0]) {
+                        const char *mp = strstr(line, "\"model\":\"");
+                        if (mp) {
+                            mp += 9;
+                            int i = 0;
+                            while (*mp && *mp != '"' && i < 63)
+                                e->model[i++] = *mp++;
+                            e->model[i] = '\0';
+                        }
+                    }
+                    /* input_tokens */
+                    const char *it = strstr(line, "\"input_tokens\":");
+                    if (it) e->input_tokens += atoi(it + 15);
+                    /* output_tokens */
+                    const char *ot = strstr(line, "\"output_tokens\":");
+                    if (ot) e->output_tokens += atoi(ot + 16);
+                    /* cache tokens count as input */
+                    const char *cr = strstr(line, "\"cache_read_input_tokens\":");
+                    if (cr) e->input_tokens += atoi(cr + 25);
+                    const char *cc = strstr(line, "\"cache_creation_input_tokens\":");
+                    if (cc) e->input_tokens += atoi(cc + 29);
+                }
+            }
+            fclose(f);
+        }
+        count++;
+    }
+    g_dir_close(dir);
+
+    if (count == 0) { vibe_window_toast(win, "No sessions found"); return; }
+    qsort(entries, count, sizeof(SessionEntry), session_cmp);
+
+    /* Build dialog */
+    GtkWidget *dialog = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(dialog), "Sessions");
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(win->window));
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 500, 400);
+    gtk_window_set_titlebar(GTK_WINDOW(dialog), adw_header_bar_new());
+
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_window_set_child(GTK_WINDOW(dialog), scroll);
+
+    GtkWidget *listbox = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(listbox), GTK_SELECTION_SINGLE);
+    g_signal_connect(listbox, "row-activated",
+                     G_CALLBACK(on_session_browser_row_activated), win);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), listbox);
+
+    for (int i = 0; i < count; i++) {
+        SessionEntry *e = &entries[i];
+        GtkWidget *row_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        gtk_widget_set_margin_start(row_box, 8);
+        gtk_widget_set_margin_end(row_box, 8);
+        gtk_widget_set_margin_top(row_box, 4);
+        gtk_widget_set_margin_bottom(row_box, 4);
+
+        gboolean is_current = win->ai_session_id[0] &&
+                              strcmp(e->sid, win->ai_session_id) == 0;
+
+        /* Top row: summary + date */
+        GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+
+        char left[256];
+        if (e->summary[0])
+            snprintf(left, sizeof(left), "%s%s",
+                     e->summary, is_current ? "  (current)" : "");
+        else
+            snprintf(left, sizeof(left), "%.12s…%s",
+                     e->sid, is_current ? "  (current)" : "");
+
+        GtkWidget *left_label = gtk_label_new(left);
+        gtk_label_set_xalign(GTK_LABEL(left_label), 0);
+        gtk_label_set_ellipsize(GTK_LABEL(left_label), PANGO_ELLIPSIZE_END);
+        gtk_widget_set_hexpand(left_label, TRUE);
+        if (is_current) gtk_widget_add_css_class(left_label, "accent");
+        gtk_box_append(GTK_BOX(top), left_label);
+
+        GDateTime *dt = g_date_time_new_from_unix_local(e->mtime);
+        char *date_str = dt ? g_date_time_format(dt, "%Y-%m-%d %H:%M") : g_strdup("?");
+        if (dt) g_date_time_unref(dt);
+        GtkWidget *date_label = gtk_label_new(date_str);
+        gtk_widget_add_css_class(date_label, "dim-label");
+        g_free(date_str);
+        gtk_box_append(GTK_BOX(top), date_label);
+
+        gtk_box_append(GTK_BOX(row_box), top);
+
+        /* Bottom row: model, turns, tokens */
+        char info[256];
+        char in_s[16], out_s[16];
+        #define FMT_K(buf, n) do { \
+            if ((n) >= 1000000) snprintf(buf, sizeof(buf), "%.1fM", (n)/1e6); \
+            else if ((n) >= 1000) snprintf(buf, sizeof(buf), "%.1fk", (n)/1e3); \
+            else snprintf(buf, sizeof(buf), "%d", (n)); \
+        } while(0)
+        FMT_K(in_s, e->input_tokens);
+        FMT_K(out_s, e->output_tokens);
+        #undef FMT_K
+        snprintf(info, sizeof(info), "%s   %d turns   in: %s  out: %s",
+                 e->model[0] ? e->model : "?", e->turns, in_s, out_s);
+        GtkWidget *info_label = gtk_label_new(info);
+        gtk_label_set_xalign(GTK_LABEL(info_label), 0);
+        gtk_widget_add_css_class(info_label, "dim-label");
+        gtk_box_append(GTK_BOX(row_box), info_label);
+
+        g_object_set_data_full(G_OBJECT(row_box), "session-id",
+                               g_strdup(e->sid), g_free);
+        gtk_list_box_insert(GTK_LIST_BOX(listbox), row_box, -1);
+    }
+
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
+static void on_new_session_clicked(GtkButton *btn, gpointer data) {
+    (void)data;
+    VibeWindow *win = g_object_get_data(G_OBJECT(btn), "win");
+    GtkWidget *popover = g_object_get_data(G_OBJECT(btn), "popover");
+    gtk_popover_popdown(GTK_POPOVER(popover));
+
+    win->ai_session_id[0] = '\0';
+    win->settings.ai_last_session[0] = '\0';
+    win->ai_session_turns = 0;
+    win->ai_input_tokens = 0;
+    win->ai_output_tokens = 0;
+    win->ai_session_start = 0;
+    settings_save(&win->settings);
+    if (win->ai_conversation_md)
+        g_string_truncate(win->ai_conversation_md, 0);
+    ai_refresh_output(win);
+    update_status_bar(win);
+    vibe_window_toast(win, "New session started");
+}
+
+
 /* ── Session info popover ── */
 
 static void on_session_label_clicked(GtkGestureClick *gesture, int n_press,
@@ -2183,23 +2541,25 @@ static void on_session_label_clicked(GtkGestureClick *gesture, int n_press,
 
     /* Only show on AI tab */
     if (gtk_notebook_get_current_page(win->notebook) != 2) return;
-    if (!win->ai_session_id[0]) return;
 
     GtkWidget *popover = gtk_popover_new();
     gtk_widget_set_parent(popover, gtk_event_controller_get_widget(
         GTK_EVENT_CONTROLLER(gesture)));
 
-    GtkWidget *grid = gtk_grid_new();
+    GtkWidget *grid = NULL;
+    GtkWidget *lbl;
+    int row = 0;
+
+    if (win->ai_session_id[0]) {
+    grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid), 4);
     gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
     gtk_widget_set_margin_start(grid, 12);
     gtk_widget_set_margin_end(grid, 12);
     gtk_widget_set_margin_top(grid, 8);
     gtk_widget_set_margin_bottom(grid, 8);
-    int row = 0;
 
     /* Session ID */
-    GtkWidget *lbl;
     lbl = gtk_label_new("Session:");
     gtk_label_set_xalign(GTK_LABEL(lbl), 1);
     gtk_widget_add_css_class(lbl, "dim-label");
@@ -2279,7 +2639,39 @@ static void on_session_label_clicked(GtkGestureClick *gesture, int n_press,
     gtk_label_set_xalign(GTK_LABEL(lbl), 0);
     gtk_grid_attach(GTK_GRID(grid), lbl, 1, row++, 1, 1);
 
-    gtk_popover_set_child(GTK_POPOVER(popover), grid);
+    } /* end if (ai_session_id[0]) */
+
+    /* ── Separator + session picker ── */
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    if (grid)
+        gtk_box_append(GTK_BOX(vbox), grid);
+
+    GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    if (grid)
+        gtk_box_append(GTK_BOX(vbox), sep);
+
+    /* Buttons row */
+    GtkWidget *btn_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_margin_start(btn_row, 8);
+    gtk_widget_set_margin_end(btn_row, 8);
+
+    GtkWidget *new_btn = gtk_button_new_with_label("New Session");
+    gtk_widget_add_css_class(new_btn, "flat");
+    g_object_set_data(G_OBJECT(new_btn), "win", win);
+    g_object_set_data(G_OBJECT(new_btn), "popover", popover);
+    g_signal_connect(new_btn, "clicked", G_CALLBACK(on_new_session_clicked), NULL);
+    gtk_box_append(GTK_BOX(btn_row), new_btn);
+
+    GtkWidget *open_btn = gtk_button_new_with_label("Open Session…");
+    gtk_widget_add_css_class(open_btn, "flat");
+    g_object_set_data(G_OBJECT(open_btn), "win", win);
+    g_object_set_data(G_OBJECT(open_btn), "popover", popover);
+    g_signal_connect(open_btn, "clicked", G_CALLBACK(on_open_sessions_clicked), NULL);
+    gtk_box_append(GTK_BOX(btn_row), open_btn);
+
+    gtk_box_append(GTK_BOX(vbox), btn_row);
+
+    gtk_popover_set_child(GTK_POPOVER(popover), vbox);
     gtk_popover_popup(GTK_POPOVER(popover));
 }
 

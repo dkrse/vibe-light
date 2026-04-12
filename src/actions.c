@@ -1078,6 +1078,7 @@ typedef struct {
     GtkCheckButton *chk_streaming;
     GtkCheckButton *chk_auto_accept;
     GtkEntry       *session_entry;
+    GtkEntry       *sessions_dir_entry;
 } AiModelCtx;
 
 static void on_ai_resume_session(GtkButton *btn, gpointer data) {
@@ -1115,6 +1116,9 @@ static void on_ai_model_apply(GtkButton *btn, gpointer data) {
     ctx->win->settings.ai_markdown   = gtk_check_button_get_active(ctx->chk_markdown);
     ctx->win->settings.ai_streaming  = gtk_check_button_get_active(ctx->chk_streaming);
     ctx->win->settings.ai_auto_accept = gtk_check_button_get_active(ctx->chk_auto_accept);
+    const char *sdir = gtk_editable_get_text(GTK_EDITABLE(ctx->sessions_dir_entry));
+    g_strlcpy(ctx->win->settings.ai_sessions_dir, sdir ? sdir : "",
+              sizeof(ctx->win->settings.ai_sessions_dir));
     settings_save(&ctx->win->settings);
     vibe_window_switch_ai_mode(ctx->win);
     gtk_window_close(ctx->dialog);
@@ -1144,6 +1148,40 @@ static void on_ai_new_session(GtkButton *btn, gpointer data) {
 static void on_ai_model_destroy(GtkWidget *widget, gpointer data) {
     (void)widget;
     g_free(data);
+}
+
+static void on_sessions_dir_browse_done(GObject *src, GAsyncResult *res, gpointer data) {
+    GtkEntry *entry = data;
+    GFile *file = gtk_file_dialog_select_folder_finish(GTK_FILE_DIALOG(src), res, NULL);
+    if (file) {
+        char *path = g_file_get_path(file);
+        if (path) {
+            gtk_editable_set_text(GTK_EDITABLE(entry), path);
+            g_free(path);
+        }
+        g_object_unref(file);
+    }
+}
+
+static void on_sessions_dir_browse(GtkButton *btn, gpointer data) {
+    (void)data;
+    GtkEntry *entry = g_object_get_data(G_OBJECT(btn), "entry");
+    GtkWindow *parent = g_object_get_data(G_OBJECT(btn), "dialog");
+
+    GtkFileDialog *fd = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(fd, "Select sessions directory");
+
+    /* Set initial folder from entry text or home */
+    const char *cur = gtk_editable_get_text(GTK_EDITABLE(entry));
+    if (cur && cur[0]) {
+        GFile *init = g_file_new_for_path(cur);
+        gtk_file_dialog_set_initial_folder(fd, init);
+        g_object_unref(init);
+    }
+
+    gtk_file_dialog_select_folder(fd, parent, NULL,
+                                   on_sessions_dir_browse_done, entry);
+    g_object_unref(fd);
 }
 
 static void on_ai_model_dialog(GSimpleAction *action, GVariant *param, gpointer data) {
@@ -1318,6 +1356,51 @@ static void on_ai_model_dialog(GSimpleAction *action, GVariant *param, gpointer 
     gtk_widget_add_css_class(sid_label, "dim-label");
     gtk_label_set_selectable(GTK_LABEL(sid_label), TRUE);
     gtk_box_append(GTK_BOX(vbox), sid_label);
+
+    /* Sessions directory */
+    {
+        GtkWidget *sd_label = gtk_label_new("Sessions directory:");
+        gtk_label_set_xalign(GTK_LABEL(sd_label), 0);
+        gtk_widget_add_css_class(sd_label, "dim-label");
+        gtk_box_append(GTK_BOX(vbox), sd_label);
+
+        ctx->sessions_dir_entry = GTK_ENTRY(gtk_entry_new());
+        /* Show current effective path as placeholder */
+        char default_dir[4096];
+        const char *cwd_src = win->ai_cwd[0] ? win->ai_cwd : win->root_dir;
+        if (cwd_src[0]) {
+            char safe[2048];
+            g_strlcpy(safe, cwd_src, sizeof(safe));
+            for (char *p = safe; *p; p++)
+                if (*p == '/') *p = '-';
+            snprintf(default_dir, sizeof(default_dir),
+                     "%s/.claude/projects/%s", g_get_home_dir(), safe);
+        } else {
+            snprintf(default_dir, sizeof(default_dir), "(no working directory)");
+        }
+        gtk_entry_set_placeholder_text(ctx->sessions_dir_entry, default_dir);
+        if (win->settings.ai_sessions_dir[0])
+            gtk_editable_set_text(GTK_EDITABLE(ctx->sessions_dir_entry),
+                                  win->settings.ai_sessions_dir);
+        gtk_widget_set_hexpand(GTK_WIDGET(ctx->sessions_dir_entry), TRUE);
+
+        GtkWidget *sd_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        gtk_box_append(GTK_BOX(sd_row), GTK_WIDGET(ctx->sessions_dir_entry));
+        GtkWidget *browse_btn = gtk_button_new_with_label("Browse…");
+        g_object_set_data(G_OBJECT(browse_btn), "entry",
+                          (gpointer)ctx->sessions_dir_entry);
+        g_object_set_data(G_OBJECT(browse_btn), "dialog",
+                          (gpointer)ctx->dialog);
+        g_signal_connect(browse_btn, "clicked",
+                         G_CALLBACK(on_sessions_dir_browse), NULL);
+        gtk_box_append(GTK_BOX(sd_row), browse_btn);
+        gtk_box_append(GTK_BOX(vbox), sd_row);
+
+        GtkWidget *sd_hint = gtk_label_new("Leave empty for auto-detected path");
+        gtk_label_set_xalign(GTK_LABEL(sd_hint), 0);
+        gtk_widget_add_css_class(sd_hint, "dim-label");
+        gtk_box_append(GTK_BOX(vbox), sd_hint);
+    }
 
     /* Resume session entry */
     GtkWidget *resume_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);

@@ -58,6 +58,7 @@ typedef struct {
     char ai_last_session[128];  /* persist session ID across restarts */
     gint64 ai_session_start;    /* real time (µs) when session was created */
     int ai_session_turns;       /* number of prompts in this session */
+    char ai_sessions_dir[4096]; /* override for sessions directory */
 
     /* PDF export */
     double pdf_margin_left;     /* mm */

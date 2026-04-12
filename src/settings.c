@@ -167,6 +167,7 @@ void settings_load(VibeSettings *s) {
         else if (strcmp(key, "ai_last_session") == 0) g_strlcpy(s->ai_last_session, val, sizeof(s->ai_last_session));
         else if (strcmp(key, "ai_session_start") == 0) s->ai_session_start = g_ascii_strtoll(val, NULL, 10);
         else if (strcmp(key, "ai_session_turns") == 0) s->ai_session_turns = atoi(val);
+        else if (strcmp(key, "ai_sessions_dir") == 0) g_strlcpy(s->ai_sessions_dir, val, sizeof(s->ai_sessions_dir));
 
         else if (strcmp(key, "pdf_margin_left") == 0) s->pdf_margin_left = parse_double(val);
         else if (strcmp(key, "pdf_margin_right") == 0) s->pdf_margin_right = parse_double(val);
@@ -365,6 +366,8 @@ void settings_save(const VibeSettings *s) {
     fprintf(f, "ai_last_session=%s\n", s->ai_last_session);
     fprintf(f, "ai_session_start=%ld\n", (long)s->ai_session_start);
     fprintf(f, "ai_session_turns=%d\n", s->ai_session_turns);
+    if (s->ai_sessions_dir[0])
+        fprintf(f, "ai_sessions_dir=%s\n", s->ai_sessions_dir);
 
     fprintf(f, "pdf_margin_left=%.1f\n", s->pdf_margin_left);
     fprintf(f, "pdf_margin_right=%.1f\n", s->pdf_margin_right);

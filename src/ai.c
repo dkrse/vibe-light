@@ -1004,6 +1004,9 @@ static void ai_stream_finalize(VibeWindow *win) {
             model[me - mu] = '\0';
             gtk_label_set_text(win->ai_status_label, model);
         }
+    } else {
+        /* No model in response — clear thinking status */
+        gtk_label_set_text(win->ai_status_label, "ready");
     }
     update_status_bar(win);
 
@@ -1109,6 +1112,41 @@ void on_ai_stream_line_ready(GObject *src, GAsyncResult *res, gpointer data) {
                 win->ai_last_prompt = NULL;
                 send_prompt_to_ai(win);
             }
+            return;
+        }
+        if (win->ai_response_buf->len == 0) {
+            /* No result event received — process failed silently.
+               Try to read stderr for a useful error message. */
+            if (win->ai_timer_id) { g_source_remove(win->ai_timer_id); win->ai_timer_id = 0; }
+            char *stderr_msg = NULL;
+            if (win->ai_proc) {
+                GInputStream *errstream = g_subprocess_get_stderr_pipe(win->ai_proc);
+                if (errstream) {
+                    GBytes *eb = g_input_stream_read_bytes(errstream, 4096, NULL, NULL);
+                    if (eb) {
+                        gsize elen;
+                        const char *edata = g_bytes_get_data(eb, &elen);
+                        if (elen > 0) stderr_msg = g_strndup(edata, elen);
+                        g_bytes_unref(eb);
+                    }
+                }
+            }
+            if (stderr_msg && stderr_msg[0]) {
+                /* Strip trailing whitespace */
+                g_strchomp(stderr_msg);
+                g_string_append_printf(win->ai_conversation_md,
+                    "\n\n**Error:** %s\n\n", stderr_msg);
+            } else {
+                g_string_append(win->ai_conversation_md,
+                    "\n\n**Error:** Model process exited with no response. "
+                    "Check that `claude` is installed and configured.\n\n");
+            }
+            g_free(stderr_msg);
+            ai_refresh_output(win);
+            gtk_label_set_text(win->ai_status_label, "error");
+            update_status_bar(win);
+            g_clear_object(&win->ai_stream);
+            g_clear_object(&win->ai_proc);
             return;
         }
         ai_stream_finalize(win);
@@ -1224,23 +1262,6 @@ void on_ai_stream_line_ready(GObject *src, GAsyncResult *res, gpointer data) {
                     g_string_prepend(win->ai_conversation_md, "*… (earlier conversation trimmed) …*\n\n");
                 }
                 g_string_append(win->ai_conversation_md, delta->str);
-                /* Streaming: append delta text via JS for performance instead of
-                 * full cmark re-render.  Full render happens on stream finalize. */
-                char *escaped_js = g_markup_escape_text(delta->str, -1);
-                /* Also escape backslashes and quotes for JS string literal */
-                GString *js = g_string_new("(function(){var t=document.getElementById('_stream');if(!t){t=document.createElement('span');t.id='_stream';document.body.appendChild(t);}t.insertAdjacentText('beforeend','");
-                for (const char *c = escaped_js; *c; c++) {
-                    if (*c == '\\') g_string_append(js, "\\\\");
-                    else if (*c == '\'') g_string_append(js, "\\'");
-                    else if (*c == '\n') g_string_append(js, "\\n");
-                    else if (*c == '\r') g_string_append(js, "\\r");
-                    else g_string_append_c(js, *c);
-                }
-                g_string_append(js, "');window.scrollTo(0,document.body.scrollHeight);})()");
-                webkit_web_view_evaluate_javascript(win->ai_webview, js->str, -1,
-                                                     NULL, NULL, NULL, NULL, NULL);
-                g_string_free(js, TRUE);
-                g_free(escaped_js);
             }
             g_string_free(delta, TRUE);
         }
@@ -1338,7 +1359,6 @@ void send_prompt_to_ai(VibeWindow *win) {
     GPtrArray *argv = g_ptr_array_new();
     g_ptr_array_add(argv, (gpointer)"claude");
     g_ptr_array_add(argv, (gpointer)"-p");
-    g_ptr_array_add(argv, (gpointer)text);
     if (win->ai_session_id[0]) {
         g_ptr_array_add(argv, (gpointer)"--resume");
         g_ptr_array_add(argv, (gpointer)win->ai_session_id);
@@ -1394,6 +1414,7 @@ void send_prompt_to_ai(VibeWindow *win) {
     g_ptr_array_add(argv, NULL);
 
     GSubprocessLauncher *launcher = g_subprocess_launcher_new(
+        G_SUBPROCESS_FLAGS_STDIN_PIPE |
         G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
 
     /* Use terminal's CWD as working directory for claude */
@@ -1435,15 +1456,23 @@ void send_prompt_to_ai(VibeWindow *win) {
     g_string_truncate(win->ai_response_buf, 0);
 
     if (win->settings.ai_streaming) {
+        /* Write prompt to stdin and close so claude reads it */
+        GOutputStream *stdin_pipe = g_subprocess_get_stdin_pipe(win->ai_proc);
+        if (stdin_pipe) {
+            g_output_stream_write_all(stdin_pipe, text, strlen(text), NULL, NULL, NULL);
+            g_output_stream_close(stdin_pipe, NULL, NULL);
+        }
         /* Streaming mode: read stdout line-by-line as events arrive */
         GInputStream *stdout_pipe = g_subprocess_get_stdout_pipe(win->ai_proc);
         win->ai_stream = g_data_input_stream_new(stdout_pipe);
         g_data_input_stream_read_line_async(win->ai_stream,
             G_PRIORITY_DEFAULT, win->cancellable, on_ai_stream_line_ready, win);
     } else {
-        /* Batch mode: read all stdout when process exits */
-        g_subprocess_communicate_async(win->ai_proc, NULL, win->cancellable,
+        /* Batch mode: communicate handles stdin + stdout + stderr */
+        GBytes *input_bytes = g_bytes_new(text, strlen(text));
+        g_subprocess_communicate_async(win->ai_proc, input_bytes, win->cancellable,
                                         on_ai_communicate_done, win);
+        g_bytes_unref(input_bytes);
     }
 
     gtk_text_buffer_set_text(win->prompt_buffer, "", -1);

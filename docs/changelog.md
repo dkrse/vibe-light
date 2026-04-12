@@ -2,18 +2,34 @@
 
 ## v0.10.1 (2026-04-12)
 
+### Features
+
+- **Session browser** -- "Open Session…" button in status bar popover opens a full window listing all sessions with summary, date, model, turns, and token usage (in/out formatted as k/M). Click a session to load it with full conversation reconstruction from JSONL files.
+- **Session picker in status bar** -- click "sessions ▾" / "session: xxx… ▾" in status bar to access New Session and Open Session actions
+- **Session state restoration** -- loading a session restores conversation text, token counts (input/output including cache), turn count, and model name from JSONL data
+- **Sessions directory setting** -- configurable sessions directory in AI Model dialog with Browse… button (GtkFileDialog folder picker). Stored in `ai_sessions_dir` setting. Empty = auto-detected from CWD.
+- **Prompt via stdin pipe** -- multi-line prompts sent via stdin instead of `-p` argument, eliminating CLI argument parsing issues with special characters
+- **Deferred markdown render** -- streaming text deltas are accumulated silently; markdown render happens once when model finishes (no incremental JS DOM updates)
+- **Silent failure error display** -- when claude process exits with no response, stderr is captured and displayed as error message instead of silent freeze
+
 ### Bug Fixes
 
 - **Inline rename crash on click away** -- clicking another file/directory during rename caused use-after-free crash. Focus-out callback accessed freed `InlineEditCtx`. Fixed by deferring focus-out cancel via `g_idle_add` and tracking active edit context on `VibeWindow`. `filebrowser_cancel_inline_edit()` is called in `on_file_row_activated` and `refresh_file_list_local` before any row destruction.
 - **Gitignored directories not styled** -- newly created directories inside gitignored parents were not marked with italic/gray styling. Root cause: `git status --porcelain -u --ignored` does not report empty ignored directories. Fixed by using `--ignored=matching` which reports ignored directory patterns (e.g. `!! build/`) regardless of contents.
 - **Git status styling delay after refresh** -- after file list rebuild, git status styling was only applied after async fetch completed. Now cached git status is applied immediately via `apply_git_status_to_rows()` in `refresh_file_list_local`.
 - **Focus-out during rename now cancels** -- clicking away from inline rename entry cancels the rename (restores original name) instead of confirming it.
+- **"Thinking…" stuck in status bar** -- when model finished without valid JSON result, status bar stayed on "thinking… Xs". Now falls back to "ready".
+- **Session file filter** -- UUID.jsonl filenames (42 chars) were incorrectly filtered out by `nlen < 43` check. Fixed to `< 42`.
 
 ### Architecture
 
 - `VibeWindow.inline_edit_ctx` -- new field tracks active inline edit context, enabling safe cancellation from any code path
 - `filebrowser_cancel_inline_edit()` -- new public API to safely cancel any active inline edit
 - `inline_edit_finish()` no longer frees `InlineEditCtx` -- ctx lifetime managed by `filebrowser_cancel_inline_edit` / `start_inline_edit` to prevent use-after-free from deferred GTK signals
+- `get_sessions_dir()` -- helper to resolve sessions directory (custom setting or auto-detected from CWD)
+- `SessionEntry` struct -- holds session metadata (sid, summary, mtime, turns, input/output tokens, model)
+- AI prompt sent via `G_SUBPROCESS_FLAGS_STDIN_PIPE` + `g_output_stream_write_all` instead of `-p` CLI argument
+- `ai_sessions_dir` setting in `VibeSettings` for custom sessions path
 
 ## v0.10.0 (2026-04-11)
 
