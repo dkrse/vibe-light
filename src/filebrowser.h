@@ -11,6 +11,9 @@ void filebrowser_show_context_menu(VibeWindow *win, GtkWidget *widget,
 /* Inline rename — replaces the row label with an editable entry */
 void filebrowser_inline_rename(VibeWindow *win, GtkListBoxRow *row);
 
+/* Cancel any active inline edit (rename/new). Safe to call when none is active. */
+void filebrowser_cancel_inline_edit(VibeWindow *win);
+
 /* Set up drag & drop for file tree reordering/moving */
 void filebrowser_setup_dnd(VibeWindow *win);
 

@@ -106,6 +106,9 @@ struct _VibeWindow {
 
     VibeSettings          settings;
     GtkCssProvider       *css_provider;
+
+    /* Active inline edit context (rename / new file) — NULL when idle */
+    void                 *inline_edit_ctx;
 };
 
 VibeWindow *vibe_window_new(GtkApplication *app);

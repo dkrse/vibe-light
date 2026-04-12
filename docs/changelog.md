@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.10.1 (2026-04-12)
+
+### Bug Fixes
+
+- **Inline rename crash on click away** -- clicking another file/directory during rename caused use-after-free crash. Focus-out callback accessed freed `InlineEditCtx`. Fixed by deferring focus-out cancel via `g_idle_add` and tracking active edit context on `VibeWindow`. `filebrowser_cancel_inline_edit()` is called in `on_file_row_activated` and `refresh_file_list_local` before any row destruction.
+- **Gitignored directories not styled** -- newly created directories inside gitignored parents were not marked with italic/gray styling. Root cause: `git status --porcelain -u --ignored` does not report empty ignored directories. Fixed by using `--ignored=matching` which reports ignored directory patterns (e.g. `!! build/`) regardless of contents.
+- **Git status styling delay after refresh** -- after file list rebuild, git status styling was only applied after async fetch completed. Now cached git status is applied immediately via `apply_git_status_to_rows()` in `refresh_file_list_local`.
+- **Focus-out during rename now cancels** -- clicking away from inline rename entry cancels the rename (restores original name) instead of confirming it.
+
+### Architecture
+
+- `VibeWindow.inline_edit_ctx` -- new field tracks active inline edit context, enabling safe cancellation from any code path
+- `filebrowser_cancel_inline_edit()` -- new public API to safely cancel any active inline edit
+- `inline_edit_finish()` no longer frees `InlineEditCtx` -- ctx lifetime managed by `filebrowser_cancel_inline_edit` / `start_inline_edit` to prevent use-after-free from deferred GTK signals
+
 ## v0.10.0 (2026-04-11)
 
 ### Features

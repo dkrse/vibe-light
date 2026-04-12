@@ -71,6 +71,15 @@ typedef struct {
     int depth;
 } InlineEditCtx;
 
+static void inline_edit_ctx_free(InlineEditCtx *ctx) {
+    if (!ctx) return;
+    if (ctx->original_label) {
+        g_object_unref(ctx->original_label);
+        ctx->original_label = NULL;
+    }
+    g_free(ctx);
+}
+
 static void inline_edit_finish(InlineEditCtx *ctx, const char *name) {
     if (ctx->finished) return;
     ctx->finished = TRUE;
@@ -137,26 +146,25 @@ static void inline_edit_finish(InlineEditCtx *ctx, const char *name) {
         }
     }
 
+    /* NOTE: do NOT g_free(ctx) here — focus-out callbacks may still
+       reference it after this function returns.  ctx is freed later
+       by filebrowser_cancel_inline_edit / start_inline_edit. */
+
     if (did_something) {
-        /* Row will be destroyed by refresh — just clean up */
-        if (ctx->original_label)
+        if (ctx->original_label) {
             g_object_unref(ctx->original_label);
-        g_free(ctx);
+            ctx->original_label = NULL;
+        }
         vibe_window_refresh_current_dir(win);
     } else if (ctx->is_new) {
         /* Remove temporary row */
-        GtkListBoxRow *row = ctx->row;
-        g_free(ctx);
-        gtk_list_box_remove(win->file_list, GTK_WIDGET(row));
+        gtk_list_box_remove(win->file_list, GTK_WIDGET(ctx->row));
     } else if (ctx->original_label) {
         /* Restore original label (rename cancelled) */
         GtkWidget *orig = ctx->original_label;
-        GtkListBoxRow *row = ctx->row;
-        g_free(ctx);
-        gtk_list_box_row_set_child(row, orig);
+        ctx->original_label = NULL;
+        gtk_list_box_row_set_child(ctx->row, orig);
         g_object_unref(orig);
-    } else {
-        g_free(ctx);
     }
 }
 
@@ -176,20 +184,28 @@ static gboolean on_edit_key(GtkEventControllerKey *ctrl, guint keyval,
     return FALSE;
 }
 
+static gboolean idle_cancel_edit(gpointer data) {
+    VibeWindow *win = data;
+    filebrowser_cancel_inline_edit(win);
+    return G_SOURCE_REMOVE;
+}
+
 static void on_edit_focus_out(GtkEventControllerFocus *ctrl, gpointer data) {
     (void)ctrl;
     InlineEditCtx *ctx = data;
-    GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(ctx->row));
-    if (child && GTK_IS_ENTRY(child)) {
-        const char *text = gtk_editable_get_text(GTK_EDITABLE(child));
-        inline_edit_finish(ctx, text);
-    }
+    if (ctx->finished) return;
+    /* Defer cancel to next main-loop iteration so the current click
+       event finishes processing before we touch the row tree. */
+    g_idle_add(idle_cancel_edit, ctx->win);
 }
 
 static void start_inline_edit(VibeWindow *win, GtkListBoxRow *row,
                                GtkWidget *original_label, const char *parent_dir,
                                const char *prefill, gboolean is_dir, gboolean is_new,
                                int depth) {
+    /* Cancel any previous inline edit before starting a new one */
+    filebrowser_cancel_inline_edit(win);
+
     InlineEditCtx *ctx = g_new0(InlineEditCtx, 1);
     ctx->win = win;
     ctx->row = row;
@@ -198,6 +214,7 @@ static void start_inline_edit(VibeWindow *win, GtkListBoxRow *row,
     ctx->is_new = is_new;
     ctx->depth = depth;
     g_strlcpy(ctx->parent_dir, parent_dir, sizeof(ctx->parent_dir));
+    win->inline_edit_ctx = ctx;
 
     if (original_label)
         g_object_ref(original_label);
@@ -231,6 +248,17 @@ static void start_inline_edit(VibeWindow *win, GtkListBoxRow *row,
                       ? (int)(dot - prefill) : (int)strlen(prefill);
         gtk_editable_select_region(GTK_EDITABLE(entry), 0, sel_len);
     }
+}
+
+/* ── Cancel active inline edit (public) ── */
+
+void filebrowser_cancel_inline_edit(VibeWindow *win) {
+    InlineEditCtx *ctx = win->inline_edit_ctx;
+    if (!ctx) return;
+    if (!ctx->finished)
+        inline_edit_finish(ctx, NULL);
+    win->inline_edit_ctx = NULL;
+    inline_edit_ctx_free(ctx);
 }
 
 /* ── Inline rename (public) ── */

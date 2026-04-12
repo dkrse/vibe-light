@@ -216,12 +216,12 @@ File browser shows git status with colored labels (Pango markup):
 ### Implementation
 
 - `git rev-parse --show-toplevel` finds the repo root
-- `git status --porcelain -u --ignored` fetches all statuses
+- `git status --porcelain -u --ignored=matching` fetches all statuses
 - Results stored in `GHashTable` (relative path -> status char)
 - Directory status: highest-priority status of children (conflict > modified > staged > untracked > deleted). Directories where ALL children are ignored are marked as ignored.
 - Runs asynchronously via GTask (background thread)
 - Refreshes on directory open and filesystem change events
-- Works over SSH: `ssh ... git -C <dir> status --porcelain -u --ignored`
+- Works over SSH: `ssh ... git -C <dir> status --porcelain -u --ignored=matching`
 
 ### Gitignored Files
 
@@ -229,7 +229,7 @@ Controlled by `show_gitignored` setting:
 - **0 (Hide):** rows with 'I' status are hidden via `gtk_widget_set_visible(FALSE)`
 - **1 (Show gray):** rows display with dark gray colored text
 
-Detection handles both `!! file` (individual ignored files) and `!! dir/` (ignored directories) entries. `is_dir_all_ignored()` detects directories where all children are individually ignored (e.g. `build/*.o`).
+Uses `--ignored=matching` to report ignored directory patterns (e.g. `!! build/`) even when empty. `is_path_ignored()` checks parent directories for ignore status, so subdirectories of ignored parents are correctly styled. `is_dir_all_ignored()` detects directories where all children are individually ignored (e.g. `build/*.o`). Cached git status is applied immediately on file list refresh (before async re-fetch).
 
 ## File Browser
 
@@ -347,8 +347,11 @@ Right-click on any file or directory:
 
 ### Inline Edit (shared for New File, New Folder, Rename)
 - `InlineEditCtx` holds row, original_label (ref'd), parent_dir, is_new flag
-- `finished` guard flag + signal disconnection on `entry`, `key_ctrl`, `focus_ctrl` prevents re-entrant calls from focus-out during `vibe_window_refresh_current_dir()`
-- ctx freed before refresh to prevent dangling pointer access
+- Active ctx tracked via `win->inline_edit_ctx` -- enables safe cancellation from any code path
+- `finished` guard flag + signal disconnection on `entry`, `key_ctrl`, `focus_ctrl` prevents re-entrant calls
+- Focus-out defers cancel via `g_idle_add` to avoid interfering with GTK's click event processing
+- ctx lifetime managed by `filebrowser_cancel_inline_edit()` / `start_inline_edit()` (NOT freed in `inline_edit_finish`) to prevent use-after-free from deferred GTK focus signals
+- `filebrowser_cancel_inline_edit()` called in `on_file_row_activated` and `refresh_file_list_local` before row destruction
 
 ### Drag & Drop (within tree)
 - `GtkDragSource` on `file_list` widget (not per-row — avoids eating clicks)

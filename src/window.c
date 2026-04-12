@@ -527,7 +527,7 @@ static void git_status_thread(GTask *task, gpointer src, gpointer data,
             ctx->git_root = root;
 
             const char *status_argv[] = {"git", "-C", root, "status",
-                                          "--porcelain", "-u", "--ignored", NULL};
+                                          "--porcelain", "-u", "--ignored=matching", NULL};
             char *status = NULL;
             if (g_spawn_sync(NULL, (char **)status_argv, NULL, G_SPAWN_SEARCH_PATH,
                               NULL, NULL, &status, NULL, &exit_status, NULL) &&
@@ -1084,6 +1084,7 @@ static void restore_expanded(VibeWindow *win, GPtrArray *paths) {
 
 /* Repopulate the file list, preserving expanded dirs (local — runs on main thread) */
 static void refresh_file_list_local(VibeWindow *win) {
+    filebrowser_cancel_inline_edit(win);
     GPtrArray *expanded = collect_expanded_paths(win);
 
     GtkWidget *child;
@@ -1094,6 +1095,8 @@ static void refresh_file_list_local(VibeWindow *win) {
     restore_expanded(win, expanded);
     g_ptr_array_unref(expanded);
     update_file_status(win);
+    if (win->git_status)
+        apply_git_status_to_rows(win);
     refresh_git_status(win);
 }
 
@@ -1829,11 +1832,11 @@ static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer 
     (void)box;
     VibeWindow *win = data;
 
+    /* Cancel any active inline edit before processing the click */
+    filebrowser_cancel_inline_edit(win);
+
     GtkWidget *label = gtk_widget_get_first_child(GTK_WIDGET(row));
-    const char *full_path = g_object_get_data(G_OBJECT(label), "full-path");
-    gboolean is_dir = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(label), "is-dir"));
-    int depth = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(label), "depth"));
-    gboolean expanded = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(label), "expanded"));
+    if (!label) return;
 
     /* Handle "Show more" lazy-load rows */
     LazyLoadData *lazy = g_object_get_data(G_OBJECT(label), "lazy-load");
@@ -1887,7 +1890,11 @@ static void on_file_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer 
         return;
     }
 
+    const char *full_path = g_object_get_data(G_OBJECT(label), "full-path");
     if (!full_path) return;
+    gboolean is_dir = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(label), "is-dir"));
+    int depth = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(label), "depth"));
+    gboolean expanded = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(label), "expanded"));
 
     if (is_dir) {
         int row_idx = gtk_list_box_row_get_index(row);
