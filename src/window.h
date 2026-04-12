@@ -50,6 +50,7 @@ struct _VibeWindow {
     guint                 ai_timer_id;        /* live elapsed time update timer */
     double                ai_last_elapsed;    /* seconds for last request */
     GtkLabel             *ai_token_label;     /* token display in AI tab */
+    GtkLabel             *ai_date_label;      /* session date in AI tab */
 
     /* SSH state (for remote terminal + file browsing) */
     char                  ssh_host[256];

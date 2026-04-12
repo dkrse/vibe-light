@@ -6,11 +6,14 @@
 
 - **Session browser** -- "Open Session…" button in status bar popover opens a full window listing all sessions with summary, date, model, turns, and token usage (in/out formatted as k/M). Click a session to load it with full conversation reconstruction from JSONL files.
 - **Session picker in status bar** -- click "sessions ▾" / "session: xxx… ▾" in status bar to access New Session and Open Session actions
-- **Session state restoration** -- loading a session restores conversation text, token counts (input/output including cache), turn count, and model name from JSONL data
+- **Session state restoration** -- loading a session restores conversation text, token counts (input/output including cache), turn count, model name, and token label from JSONL data
+- **Session date in AI top bar** -- session creation date/time displayed in the AI tab status bar between model name and token info
 - **Sessions directory setting** -- configurable sessions directory in AI Model dialog with Browse… button (GtkFileDialog folder picker). Stored in `ai_sessions_dir` setting. Empty = auto-detected from CWD.
 - **Prompt via stdin pipe** -- multi-line prompts sent via stdin instead of `-p` argument, eliminating CLI argument parsing issues with special characters
 - **Deferred markdown render** -- streaming text deltas are accumulated silently; markdown render happens once when model finishes (no incremental JS DOM updates)
 - **Silent failure error display** -- when claude process exits with no response, stderr is captured and displayed as error message instead of silent freeze
+- **Ctrl+mouse scroll zoom** -- zoom font size in Files, Terminal, and AI tabs with Ctrl+scroll wheel. Files/Terminal use GTK capture-phase scroll controller (+1/-1 pt per step). AI tab uses JS wheel event → WebKit `messageHandlers.zoom` → `webkit_web_view_set_zoom_level` (0.5x–3.0x range).
+- **Default fonts** -- GUI, File Browser, Prompt default to "Cantarell" 14pt; Editor, Terminal default to "Monospace" 14pt. Font size validation: 6–72pt range enforced on load.
 
 ### Bug Fixes
 
@@ -20,16 +23,23 @@
 - **Focus-out during rename now cancels** -- clicking away from inline rename entry cancels the rename (restores original name) instead of confirming it.
 - **"Thinking…" stuck in status bar** -- when model finished without valid JSON result, status bar stayed on "thinking… Xs". Now falls back to "ready".
 - **Session file filter** -- UUID.jsonl filenames (42 chars) were incorrectly filtered out by `nlen < 43` check. Fixed to `< 42`.
+- **Token counting mismatch** -- `ai_stream_finalize` used camelCase `inputTokens` from `modelUsage` (base only, no cache). Session JSONL loading used snake_case with cache. Now both use `input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens` for consistent totals.
+- **Toast unreadable in light theme** -- `window label{color:...}` CSS override affected toast labels making them unreadable on dark toast background. Added `toast label{color:white;}` reset.
+- **Zoom keybinding migration** -- `<Control>plus` migrated to `<Control>plus|<Control>equal` so Ctrl+= works on keyboards where + requires Shift.
 
 ### Architecture
 
 - `VibeWindow.inline_edit_ctx` -- new field tracks active inline edit context, enabling safe cancellation from any code path
+- `VibeWindow.ai_date_label` -- session date display in AI top bar
 - `filebrowser_cancel_inline_edit()` -- new public API to safely cancel any active inline edit
 - `inline_edit_finish()` no longer frees `InlineEditCtx` -- ctx lifetime managed by `filebrowser_cancel_inline_edit` / `start_inline_edit` to prevent use-after-free from deferred GTK signals
 - `get_sessions_dir()` -- helper to resolve sessions directory (custom setting or auto-detected from CWD)
 - `SessionEntry` struct -- holds session metadata (sid, summary, mtime, turns, input/output tokens, model)
 - AI prompt sent via `G_SUBPROCESS_FLAGS_STDIN_PIPE` + `g_output_stream_write_all` instead of `-p` CLI argument
 - `ai_sessions_dir` setting in `VibeSettings` for custom sessions path
+- AI WebKit zoom via JS `wheel` event → `window.webkit.messageHandlers.zoom.postMessage` → `on_ai_zoom_message` callback → `webkit_web_view_set_zoom_level`
+- Capture-phase `GtkEventControllerScroll` on window for Files/Terminal Ctrl+scroll zoom
+- Font size validation (6–72pt) and font name fallback on settings load
 
 ## v0.10.0 (2026-04-11)
 

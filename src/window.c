@@ -188,7 +188,10 @@ void vibe_window_apply_settings(VibeWindow *win) {
              "popover modelbutton{color:%s;}"
              "popover>contents,popover.menu>contents{color:%s;}"
              "window label{color:%s;}"
-             "window checkbutton label{color:%s;}",
+             "window checkbutton label{color:%s;}"
+             /* Reset toast to default colors so it stays readable on dark toast bg */
+             "toast label{color:white;}"
+             "toast button label{color:white;}",
              /* GUI font args */
              win->settings.gui_font, win->settings.gui_font_size,
              win->settings.gui_font, win->settings.gui_font_size,
@@ -2150,6 +2153,20 @@ static void update_status_bar_page(VibeWindow *win, int page) {
         } else {
             gtk_label_set_text(win->cursor_label, "sessions ▾");
         }
+
+        /* Session date in AI top bar */
+        if (win->ai_session_start > 0) {
+            GDateTime *dt = g_date_time_new_from_unix_local(
+                win->ai_session_start / G_USEC_PER_SEC);
+            if (dt) {
+                char *ds = g_date_time_format(dt, "%Y-%m-%d %H:%M");
+                gtk_label_set_text(win->ai_date_label, ds);
+                g_free(ds);
+                g_date_time_unref(dt);
+            }
+        } else {
+            gtk_label_set_text(win->ai_date_label, "");
+        }
     } else {
         gtk_label_set_text(win->status_label, "");
         gtk_label_set_text(win->cursor_label, "");
@@ -2318,6 +2335,26 @@ static void on_session_browser_row_activated(GtkListBox *box, GtkListBoxRow *row
     }
 
     ai_refresh_output(win);
+
+    /* Update token label */
+    {
+        char in_s[16], out_s[16], tot_s[16];
+        int total = win->ai_input_tokens + win->ai_output_tokens;
+        #define FMT_TOK(buf, n) do { \
+            if ((n) >= 1000000) snprintf(buf, sizeof(buf), "%.1fM", (n)/1e6); \
+            else if ((n) >= 1000) snprintf(buf, sizeof(buf), "%.1fk", (n)/1e3); \
+            else snprintf(buf, sizeof(buf), "%d", (n)); \
+        } while(0)
+        FMT_TOK(in_s, win->ai_input_tokens);
+        FMT_TOK(out_s, win->ai_output_tokens);
+        FMT_TOK(tot_s, total);
+        #undef FMT_TOK
+        char tok_str[256];
+        snprintf(tok_str, sizeof(tok_str), "in: %s  out: %s  total: %s",
+                 in_s, out_s, tot_s);
+        gtk_label_set_text(win->ai_token_label, tok_str);
+    }
+
     update_status_bar(win);
     char msg[128];
     snprintf(msg, sizeof(msg), "Resumed session %.8s…", sid);
@@ -2673,6 +2710,59 @@ static void on_session_label_clicked(GtkGestureClick *gesture, int n_press,
 
     gtk_popover_set_child(GTK_POPOVER(popover), vbox);
     gtk_popover_popup(GTK_POPOVER(popover));
+}
+
+/* ── AI webview Ctrl+scroll zoom (via JS message) ── */
+
+static void on_ai_zoom_message(WebKitUserContentManager *mgr,
+                                JSCValue *js_result, gpointer data) {
+    (void)mgr;
+    VibeWindow *win = data;
+    char *str = jsc_value_to_string(js_result);
+    if (str) {
+        int dir = atoi(str);
+        g_free(str);
+        double zoom = webkit_web_view_get_zoom_level(win->ai_webview);
+        zoom += (dir > 0) ? 0.1 : -0.1;
+        if (zoom < 0.5) zoom = 0.5;
+        if (zoom > 3.0) zoom = 3.0;
+        webkit_web_view_set_zoom_level(win->ai_webview, zoom);
+    }
+}
+
+/* ── Ctrl+scroll zoom ── */
+
+static gboolean on_ctrl_scroll_zoom(GtkEventControllerScroll *ctrl,
+                                     double dx, double dy, gpointer data) {
+    (void)dx;
+    GdkModifierType state = gtk_event_controller_get_current_event_state(
+        GTK_EVENT_CONTROLLER(ctrl));
+    if (!(state & GDK_CONTROL_MASK)) return FALSE;
+
+    VibeWindow *win = data;
+    int tab = gtk_notebook_get_current_page(win->notebook);
+
+    /* AI tab: handled by JS wheel handler in WebKit → on_ai_zoom_message */
+    if (tab == 2) return FALSE;
+
+    int *fs = NULL;
+    if (tab == 1) fs = &win->settings.terminal_font_size;
+    else {
+        GtkWidget *focus = gtk_window_get_focus(GTK_WINDOW(win->window));
+        if (focus && (focus == GTK_WIDGET(win->file_list) ||
+                      gtk_widget_is_ancestor(focus, GTK_WIDGET(win->file_list))))
+            fs = &win->settings.browser_font_size;
+        else
+            fs = &win->settings.editor_font_size;
+    }
+
+    if (dy < 0 && *fs < 72) { *fs += 1; }
+    else if (dy > 0 && *fs > 6) { *fs -= 1; }
+    else return FALSE;
+
+    settings_save(&win->settings);
+    vibe_window_apply_settings(win);
+    return TRUE; /* consume the event */
 }
 
 /* ── Window close ── */
@@ -3201,9 +3291,14 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     gtk_widget_add_css_class(GTK_WIDGET(win->ai_status_label), "dim-label");
     gtk_box_append(GTK_BOX(ai_status_bar), GTK_WIDGET(win->ai_status_label));
 
-    win->ai_token_label = GTK_LABEL(gtk_label_new("in: 0  out: 0  total: 0"));
+    win->ai_date_label = GTK_LABEL(gtk_label_new(""));
+    gtk_widget_add_css_class(GTK_WIDGET(win->ai_date_label), "dim-label");
+    gtk_widget_set_hexpand(GTK_WIDGET(win->ai_date_label), TRUE);
+    gtk_label_set_xalign(win->ai_date_label, 0.5);
+    gtk_box_append(GTK_BOX(ai_status_bar), GTK_WIDGET(win->ai_date_label));
+
+    win->ai_token_label = GTK_LABEL(gtk_label_new(""));
     gtk_label_set_xalign(win->ai_token_label, 1);
-    gtk_widget_set_hexpand(GTK_WIDGET(win->ai_token_label), TRUE);
     gtk_widget_add_css_class(GTK_WIDGET(win->ai_token_label), "dim-label");
     gtk_box_append(GTK_BOX(ai_status_bar), GTK_WIDGET(win->ai_token_label));
 
@@ -3228,6 +3323,12 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     /* Transparent background so it blends with the app theme */
     GdkRGBA transparent = {0, 0, 0, 0};
     webkit_web_view_set_background_color(win->ai_webview, &transparent);
+
+    /* Register Ctrl+scroll zoom via JS message handler */
+    WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(win->ai_webview);
+    g_signal_connect(ucm, "script-message-received::zoom",
+                     G_CALLBACK(on_ai_zoom_message), win);
+    webkit_user_content_manager_register_script_message_handler(ucm, "zoom", NULL);
 
     /* Demo content */
     win->ai_conversation_md = g_string_new(
@@ -3256,6 +3357,7 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     }
 
     gtk_paned_set_start_child(GTK_PANED(ai_paned), GTK_WIDGET(win->ai_webview));
+
 
     /* Prompt input */
     GtkWidget *prompt_scroll = gtk_scrolled_window_new();
@@ -3354,6 +3456,13 @@ VibeWindow *vibe_window_new(GtkApplication *app) {
     GtkDropTarget *drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
     g_signal_connect(drop, "drop", G_CALLBACK(on_drop), win);
     gtk_widget_add_controller(GTK_WIDGET(win->window), GTK_EVENT_CONTROLLER(drop));
+
+    /* Ctrl+scroll to zoom (capture phase to intercept before VTE/WebKit) */
+    GtkEventController *scroll_ctrl = gtk_event_controller_scroll_new(
+        GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
+    gtk_event_controller_set_propagation_phase(scroll_ctrl, GTK_PHASE_CAPTURE);
+    g_signal_connect(scroll_ctrl, "scroll", G_CALLBACK(on_ctrl_scroll_zoom), win);
+    gtk_widget_add_controller(GTK_WIDGET(win->window), scroll_ctrl);
 
     actions_setup(win, app);
     vibe_window_apply_settings(win);

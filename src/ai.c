@@ -309,7 +309,13 @@ void ai_refresh_output(VibeWindow *win) {
     /* Override font-size and opacity from settings */
     g_string_append_printf(html, " body { font-size: %dpx !important; opacity: %.2f !important; }",
                            win->settings.ai_font_size, win->settings.ai_font_intensity);
-    g_string_append(html, "</style></head><body>");
+    g_string_append(html,
+        "</style><script>"
+        "document.addEventListener('wheel',function(e){"
+        "if(!e.ctrlKey)return;e.preventDefault();"
+        "window.webkit.messageHandlers.zoom.postMessage(e.deltaY<0?'1':'-1');"
+        "},{passive:false});"
+        "</script></head><body>");
 
     if (win->ai_conversation_md->len > 0) {
         if (win->settings.ai_markdown) {
@@ -1014,11 +1020,14 @@ static void ai_stream_finalize(VibeWindow *win) {
     gint64 now = g_get_monotonic_time();
     win->ai_last_elapsed = (now - win->ai_start_time) / 1e6;
 
-    /* Token usage */
-    int req_in = json_extract_int(json, "inputTokens");
-    int req_out = json_extract_int(json, "outputTokens");
-    if (req_in) win->ai_input_tokens += req_in;
-    if (req_out) win->ai_output_tokens += req_out;
+    /* Token usage — use snake_case keys from top-level usage object,
+       including cache tokens as input for total cost tracking */
+    int req_in = json_extract_int(json, "input_tokens");
+    int req_cache_read = json_extract_int(json, "cache_read_input_tokens");
+    int req_cache_create = json_extract_int(json, "cache_creation_input_tokens");
+    int req_out = json_extract_int(json, "output_tokens");
+    win->ai_input_tokens += req_in + req_cache_read + req_cache_create;
+    win->ai_output_tokens += req_out;
 
     /* Update token label */
     {

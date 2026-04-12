@@ -47,10 +47,10 @@ void settings_load(VibeSettings *s) {
     s->terminal_font_intensity = 1.0;
     s->ai_font_intensity = 1.0;
 
-    g_strlcpy(s->gui_font, "Monospace", sizeof(s->gui_font));
+    g_strlcpy(s->gui_font, "Cantarell", sizeof(s->gui_font));
     s->gui_font_size = 14;
 
-    g_strlcpy(s->browser_font, "Monospace", sizeof(s->browser_font));
+    g_strlcpy(s->browser_font, "Cantarell", sizeof(s->browser_font));
     s->browser_font_size = 14;
 
     g_strlcpy(s->editor_font, "Monospace", sizeof(s->editor_font));
@@ -65,7 +65,7 @@ void settings_load(VibeSettings *s) {
     g_strlcpy(s->terminal_font, "Monospace", sizeof(s->terminal_font));
     s->terminal_font_size = 14;
 
-    g_strlcpy(s->prompt_font, "Monospace", sizeof(s->prompt_font));
+    g_strlcpy(s->prompt_font, "Cantarell", sizeof(s->prompt_font));
     s->prompt_font_size = 14;
     s->prompt_send_enter = FALSE;
     s->prompt_switch_terminal = TRUE;
@@ -102,7 +102,7 @@ void settings_load(VibeSettings *s) {
 
     /* Keybindings defaults */
     g_strlcpy(s->key_open_folder, "<Control>o", sizeof(s->key_open_folder));
-    g_strlcpy(s->key_zoom_in, "<Control>plus", sizeof(s->key_zoom_in));
+    g_strlcpy(s->key_zoom_in, "<Control>plus|<Control>equal", sizeof(s->key_zoom_in));
     g_strlcpy(s->key_zoom_out, "<Control>minus", sizeof(s->key_zoom_out));
     g_strlcpy(s->key_tab_files, "<Alt>1", sizeof(s->key_tab_files));
     g_strlcpy(s->key_tab_terminal, "<Alt>2", sizeof(s->key_tab_terminal));
@@ -233,18 +233,22 @@ void settings_load(VibeSettings *s) {
     if (s->line_spacing < 1.0) s->line_spacing = 1.0;
 
     /* restore defaults for empty/zero font fields */
-    if (!s->gui_font[0])      g_strlcpy(s->gui_font, "Monospace", sizeof(s->gui_font));
-    if (s->gui_font_size < 6)  s->gui_font_size = 14;
-    if (!s->browser_font[0])   g_strlcpy(s->browser_font, "Monospace", sizeof(s->browser_font));
-    if (s->browser_font_size < 6) s->browser_font_size = 14;
+    if (!s->gui_font[0])      g_strlcpy(s->gui_font, "Cantarell", sizeof(s->gui_font));
+    if (s->gui_font_size < 6 || s->gui_font_size > 72) s->gui_font_size = 14;
+    if (!s->browser_font[0])   g_strlcpy(s->browser_font, "Cantarell", sizeof(s->browser_font));
+    if (s->browser_font_size < 6 || s->browser_font_size > 72) s->browser_font_size = 14;
     if (!s->editor_font[0])    g_strlcpy(s->editor_font, "Monospace", sizeof(s->editor_font));
-    if (s->editor_font_size < 6)  s->editor_font_size = 14;
-    if (s->editor_font_weight < 100) s->editor_font_weight = 400;
+    if (s->editor_font_size < 6 || s->editor_font_size > 72) s->editor_font_size = 14;
+    if (s->editor_font_weight < 100 || s->editor_font_weight > 900) s->editor_font_weight = 400;
     if (!s->terminal_font[0])  g_strlcpy(s->terminal_font, "Monospace", sizeof(s->terminal_font));
-    if (s->terminal_font_size < 6) s->terminal_font_size = 14;
-    if (!s->prompt_font[0])    g_strlcpy(s->prompt_font, "Monospace", sizeof(s->prompt_font));
-    if (s->prompt_font_size < 6)  s->prompt_font_size = 14;
-    if (s->ai_font_size < 6)  s->ai_font_size = 14;
+    if (s->terminal_font_size < 6 || s->terminal_font_size > 72) s->terminal_font_size = 14;
+    if (!s->prompt_font[0])    g_strlcpy(s->prompt_font, "Cantarell", sizeof(s->prompt_font));
+    if (s->prompt_font_size < 6 || s->prompt_font_size > 72) s->prompt_font_size = 14;
+    if (s->ai_font_size < 6 || s->ai_font_size > 72) s->ai_font_size = 14;
+
+    /* Migrate: ensure zoom-in includes <Control>equal for keyboards where + requires Shift */
+    if (strcmp(s->key_zoom_in, "<Control>plus") == 0)
+        g_strlcpy(s->key_zoom_in, "<Control>plus|<Control>equal", sizeof(s->key_zoom_in));
 }
 
 static char *connections_get_path(void) {

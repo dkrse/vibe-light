@@ -426,7 +426,7 @@ On startup, local files are restored (remote files are not auto-restored since t
 | Setting | Default | Action |
 |---------|---------|--------|
 | `key_open_folder` | `<Control>o` | Open folder dialog |
-| `key_zoom_in` | `<Control>plus` | Zoom in active section |
+| `key_zoom_in` | `<Control>plus\|<Control>equal` | Zoom in active section |
 | `key_zoom_out` | `<Control>minus` | Zoom out active section |
 | `key_tab_files` | `<Alt>1` | Switch to Files tab |
 | `key_tab_terminal` | `<Alt>2` | Switch to Terminal tab |
@@ -435,6 +435,12 @@ On startup, local files are restored (remote files are not auto-restored since t
 | `key_print_pdf` | `<Control>p` | Print / Save as PDF |
 
 Supports `|` separator for alternative keys (e.g. `<Control>plus|<Control>equal`).
+
+**Ctrl+Mouse Scroll Zoom:**
+- Files/Terminal tabs: `GtkEventControllerScroll` at `GTK_PHASE_CAPTURE` on the main window. Adjusts per-section font size (±1pt per scroll step, range 6–72pt). Calls `settings_save` + `vibe_window_apply_settings`.
+- AI tab: WebKit processes scroll internally, so a JS `wheel` event listener intercepts Ctrl+scroll, posts direction via `window.webkit.messageHandlers.zoom.postMessage`, and GTK callback `on_ai_zoom_message` adjusts `webkit_web_view_set_zoom_level` (range 0.5x–3.0x, step 0.1).
+
+**Font Settings Validation:** on settings load, font sizes clamped to 6–72 (default 14), empty font names restored to defaults (Cantarell for GUI/browser/prompt, Monospace for editor/terminal), font weight clamped to 100–900 (default 400). Zoom keybinding `<Control>plus` auto-migrated to `<Control>plus|<Control>equal`.
 
 ## Tab Focus
 

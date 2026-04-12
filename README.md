@@ -105,6 +105,7 @@ All shortcuts are configurable via `settings.conf`.
 | Ctrl+O | Open folder | `key_open_folder` |
 | Ctrl+Plus / Ctrl+= | Zoom in (active section only) | `key_zoom_in` |
 | Ctrl+Minus | Zoom out (active section only) | `key_zoom_out` |
+| Ctrl+Mouse Scroll | Zoom in/out (active section) | -- |
 | Ctrl+P | Print / Save as PDF | `key_print_pdf` |
 | Alt+1 | Switch to Files tab | `key_tab_files` |
 | Alt+2 | Switch to Terminal tab | `key_tab_terminal` |
